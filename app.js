@@ -115,6 +115,16 @@ function reconcile(){
   while(t>last.end&&g++<120){var s=addDays(last.end,1);last={start:s,end:addDays(nextStartAfter(s,st.startDay||1),-1),limit:last.limit};st.periods.push(last);ch=true}
   if(ch)persist();return ch;
 }
+/* month mode: fit the current period to startDay right away (neighbours are trimmed) */
+function realign(){
+  var st=D.limit;if(!st||st.mode!=='month')return null;
+  var t=today(),per=monthPeriodFor(t,st.startDay||12),ps=st.periods,ci=ps.length-1;
+  for(var i=0;i<ps.length;i++)if(ps[i].start<=t&&t<=ps[i].end){ci=i;break}
+  var cur=ps[ci];ps.splice(ci+1);
+  while(ci>0&&ps[ci-1].start>=per.start){ps.splice(ci-1,1);ci--}
+  if(ci>0)ps[ci-1].end=addDays(per.start,-1);
+  cur.start=per.start;cur.end=per.end;return cur;
+}
 function limitRowFor(date){if(!D.limit)return null;var all=compute();for(var i=0;i<all.length;i++){var p=all[i];if(p.start<=date&&date<=p.end)return p.rows[diff(p.start,date)]}return null}
 
 /* ================= aggregates ================= */
@@ -567,12 +577,10 @@ function viewCats(){
   if(type==='exp')h+='<p class="small" style="margin:12px 4px">Переключатель справа — учитывать ли категорию в дневном лимите. Например, аренду или крупные покупки можно выключить: они останутся в учёте, но не съедят лимит.</p>';
   else h+='<div class="mt"></div>';
   function row(c,isSub){var s=splitName(c.name),par=isSub&&C.cat[c.parent];var parentOff=par&&par.nl;
-    return '<div class="crow'+(isSub?' sub':'')+(c.archived?' arch':'')+'" data-act="cat-edit" data-id="'+c.id+'"><div class="cic">'+(s.icon?esc(s.icon):esc(s.label.charAt(0).toUpperCase()))+'</div><div class="cnm">'+esc(s.label)+(c.archived?' · скрыта':'')+'</div>'+
+    return '<div class="crow'+(isSub?' sub':'')+'" data-act="cat-edit" data-id="'+c.id+'"><div class="cic">'+(s.icon?esc(s.icon):esc(s.label.charAt(0).toUpperCase()))+'</div><div class="cnm">'+esc(s.label)+'</div>'+
       (type==='exp'?'<button class="sw'+(!c.nl&&!parentOff?' on':'')+(parentOff?' dis':'')+'" data-act="cat-limit" data-id="'+c.id+'" aria-label="Учитывать в лимите"></button>':'')+'</div>'}
-  var active=tops(type),arch=tops(type,true).filter(function(c){return c.archived});
-  h+='<div class="card" style="padding:6px 16px">'+(type==='exp'?'<div class="lhint" style="padding-top:8px">в лимите</div>':'')+active.map(function(c){return row(c)+subs(c.id,true).map(function(s){return row(s,true)}).join('')}).join('')+'</div>';
+  h+='<div class="card" style="padding:6px 16px">'+(type==='exp'?'<div class="lhint" style="padding-top:8px">в лимите</div>':'')+tops(type).map(function(c){return row(c)+subs(c.id).map(function(s){return row(s,true)}).join('')}).join('')+'</div>';
   h+='<button class="btn block" data-act="cat-new">+ Новая категория</button>';
-  if(arch.length)h+='<div class="label mt2" style="margin-left:4px">Скрытые категории (есть в истории)</div><div class="card mt" style="padding:6px 16px">'+arch.map(function(c){return row(c)+subs(c.id,true).map(function(s){return row(s,true)}).join('')}).join('')+'</div>';
   return wrap(h);
 }
 function viewCatEdit(){
@@ -759,8 +767,9 @@ var A={
     if(st.mode==='custom'){var e=draft('set-end',sp.end),nx=st.periods[p.idx+1];if(!isDate(e)||e<sp.start||(nx&&e>=nx.start)){toast('Проверь дату окончания');return}sp.end=e}
     sp.limit=L;delete UI.d['set-limit'];delete UI.d['set-end'];persist();toast('Сохранено');
   },
-  lmode:function(el){if(D.limit.mode!==el.dataset.val){D.limit.mode=el.dataset.val;if(!D.limit.startDay)D.limit.startDay=12;reconcile();persist();toast('Применится со следующего периода')}},
-  'save-day':function(){var n=parseInt(digits(UI.d['set-day']),10);if(!(n>=1&&n<=31)){toast('Число от 1 до 31');return}D.limit.startDay=n;delete UI.d['set-day'];persist();toast('Сохранено')},
+  lmode:function(el){var st=D.limit;if(st.mode===el.dataset.val)return;st.mode=el.dataset.val;if(!st.startDay)st.startDay=12;delete UI.d['set-end'];
+    if(st.mode==='month'){var p=realign();toast('Период: '+range(p))}else toast('Дату окончания можно менять');persist()},
+  'save-day':function(){var n=parseInt(digits(UI.d['set-day']),10);if(!(n>=1&&n<=31)){toast('Число от 1 до 31');return}D.limit.startDay=n;delete UI.d['set-day'];var p=realign();persist();toast(p?'Период: '+range(p):'Сохранено')},
   'save-carry':function(){var v=+digits(draft('set-carry',String(Math.abs(+D.limit.initialCarry||0))))||0,sg=draft('set-sign',(+D.limit.initialCarry||0)<0?'-':'+');D.limit.initialCarry=sg==='-'?-v:v;delete UI.d['set-carry'];delete UI.d['set-sign'];persist();toast('Сохранено')},
   sp:function(el){UI.sp=el.dataset.val},
   snav:function(el){var n=+el.dataset.val,a=UI.sAnchor;UI.sAnchor=UI.sp==='week'?addDays(a,7*n):UI.sp==='year'?((+a.slice(0,4)+n)+'-01-01'):(addMonths(mkOf(a),n)+'-01')},
