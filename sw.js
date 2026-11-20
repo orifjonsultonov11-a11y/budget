@@ -1,7 +1,7 @@
 // Офлайн-кэш: приложение открывается без интернета.
 // Обновления подтягиваются в фоне и применяются при следующем запуске.
-const CACHE = 'budget-v1';
-const FILES = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
+const CACHE = 'budget-v2';
+const FILES = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png', './sql-wasm.js', './sql-wasm.wasm'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)));

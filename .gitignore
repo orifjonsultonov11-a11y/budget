@@ -1,0 +1,5 @@
+# личные данные — никогда не коммитить
+*.mmbak
+budget-*.json
+*.sqlite
+.DS_Store
