@@ -1,6 +1,7 @@
 /* Мой бюджет — учёт доходов/расходов + дневной лимит. Данные хранятся только на этом устройстве. */
 (function(){
 'use strict';
+var APP_VERSION=4; /* = version in version.json and CACHE in sw.js */
 var app=document.getElementById('app'),ov=document.getElementById('ov'),tipEl=document.getElementById('tip'),toastEl=document.getElementById('toast');
 
 /* ================= utils ================= */
@@ -153,7 +154,7 @@ function sb(txt,c){return '<b class="'+(c||'')+(String(txt).length>9?' long':'')
 function kv(label,value,c,extra){return '<div class="kv'+(extra?' '+extra:'')+'"><span>'+label+'</span><b class="'+(c||'')+'">'+value+'</b></div>'}
 function tabbar(){
   function b(t,icon,label){return '<button data-act="tab" data-val="'+t+'" class="'+(UI.tab===t?'on':'')+'">'+icon+label+'</button>'}
-  return '<nav class="tabbar">'+b('ops',I.ops,'Операции')+b('stats',I.stats,'График')+b('limit',I.limit,'Лимит')+b('settings',I.set,'Настройки')+'</nav>';
+  return '<nav class="tabbar">'+b('ops',I.ops,'Операции')+b('stats',I.stats,'График')+b('limit',I.limit,'Лимит')+b('settings',I.set,'Настройки'+(UI.upd?'<i class="dot"></i>':''))+'</nav>';
 }
 function txRow(t,opts){
   var title=t.note||catLabel(t.cat),sub=t.note?catLabel(t.cat):(t.memo||'');
@@ -552,6 +553,11 @@ function viewStatCat(){
 function viewSettings(){
   if(UI.setView==='cats')return viewCats();
   var h='<h1>Настройки</h1><p class="sub">&nbsp;</p>';
+  if(UI.upd){var rel=(UI.upd.releases||[]).filter(function(r){return r.v>APP_VERSION});
+    h+='<div class="card upd"><h3>Доступно обновление · версия '+UI.upd.version+'</h3><p class="small">Сейчас установлена версия '+APP_VERSION+'.</p>'+
+      rel.map(function(r){return '<div class="label mt">Версия '+r.v+(r.date?' · '+shortDate(r.date):'')+'</div><ul class="notes">'+(r.notes||[]).map(function(n){return '<li>'+esc(n)+'</li>'}).join('')+'</ul>'}).join('')+
+      '<button class="btn block mt" data-act="do-update"'+(UI.updating?' disabled':'')+'>'+(UI.updating?'Обновляю…':'Обновить')+'</button><p class="small">Данные не пропадут.</p></div>';
+  }
   if(D.limit){
     var st=D.limit,all=compute(),loc=locate(all,today()),p=loc.cur||loc.ended||all[all.length-1],sign=draft('set-sign',(+st.initialCarry||0)<0?'-':'+');
     h+='<div class="card"><h3>Лимит</h3><div class="label mt">Текущий период · '+range(p)+'</div>'+
@@ -569,6 +575,7 @@ function viewSettings(){
     '<button class="btn block mt" data-act="export">Сохранить копию</button><label class="btn ghost block mt filebtn">Восстановить из файла<input type="file" accept="application/json,.json,text/plain" data-file="backup" hidden></label>'+(UI.pendingKind==='backup'?pendingBox():'')+'</div>';
   if(!isStandalone())h+='<div class="card"><h3>Установка на iPhone</h3><p class="small">Открой страницу в Safari → «Поделиться» → «На экран „Домой“». Дальше запускай с иконки — работает без интернета.</p></div>';
   h+='<button class="btn ghost block danger" data-act="reset">'+(UI.resetArm?'Точно удалить всё? Нажми ещё раз':'Удалить все данные')+'</button>';
+  h+='<p class="small" style="text-align:center;margin-top:16px">Версия '+APP_VERSION+'</p>';
   return wrap(h);
 }
 function viewCats(){
@@ -704,7 +711,26 @@ function renderOv(){
   if(k){var el=ov.querySelector('[data-k="'+k+'"],[data-e="'+k+'"]');if(el&&el.type!=='date'){try{el.focus({preventScroll:true})}catch(e){}}}
 }
 var tt;function toast(m){toastEl.textContent=m;toastEl.classList.add('show');clearTimeout(tt);tt=setTimeout(function(){toastEl.classList.remove('show')},2200)}
-function tick(){if(UI.lastDay&&today()!==UI.lastDay){if(D&&reconcile()){}if(!UI.editor)render()}}
+/* updates: version.json is never cached; the button appears only when a newer version is published */
+var updT=0;
+function checkUpdate(){
+  if(location.protocol==='file:'||Date.now()-updT<120000)return;updT=Date.now();
+  fetch('version.json?'+Date.now(),{cache:'no-store'}).then(function(r){return r.ok?r.json():null}).then(function(v){
+    var nu=v&&+v.version>APP_VERSION?v:null;if(!!nu!==!!UI.upd||(nu&&UI.upd&&nu.version!==UI.upd.version)){UI.upd=nu;if(!UI.editor)render()}
+  }).catch(function(){});
+}
+function wait(ms){return new Promise(function(r){setTimeout(r,ms)})}
+async function doUpdate(){
+  try{
+    if(saveT)flush();
+    var reg=navigator.serviceWorker&&await navigator.serviceWorker.getRegistration();
+    if(reg){await reg.update();var w=reg.installing||reg.waiting;
+      if(w)await Promise.race([new Promise(function(r){w.addEventListener('statechange',function(){if(w.state==='activated'||w.state==='redundant')r()})}),wait(5000)])}
+    if(window.caches){var ks=await caches.keys();await Promise.all(ks.map(function(k){return caches.delete(k)}))}
+  }catch(e){}
+  await wait(300);location.reload();
+}
+function tick(){checkUpdate();if(UI.lastDay&&today()!==UI.lastDay){if(D&&reconcile()){}if(!UI.editor)render()}}
 
 /* ================= actions ================= */
 var A={
@@ -801,6 +827,7 @@ var A={
   'imp-cancel':function(){UI.pending=null;UI.pendingKind=null},
   'imp-ok':function(){applyPending();window.scrollTo(0,0)},
   'export':function(){exportBackup()},
+  'do-update':function(){if(UI.updating)return;UI.updating=true;doUpdate()},
   reset:function(){if(UI.resetArm){D=emptyData();UI.resetArm=false;UI.tab='ops';rebuild();persist();toast('Все данные удалены');return}UI.resetArm=true;setTimeout(function(){if(UI.resetArm){UI.resetArm=false;render()}},5000)}
 };
 document.addEventListener('click',function(e){
@@ -843,7 +870,7 @@ async function init(){
   rebuild();reconcile();UI.loaded=true;render();
   try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
   if('serviceWorker' in navigator&&location.protocol!=='file:')navigator.serviceWorker.register('sw.js').catch(function(){});
-  setInterval(tick,30000);
+  setInterval(tick,30000);checkUpdate();
 }
 window.__budget={get D(){return D},UI:UI,render:render};
 init();
