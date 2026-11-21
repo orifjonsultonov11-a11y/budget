@@ -1,8 +1,11 @@
 // Очередь платежей Apple Pay для приложения «Мой бюджет».
-// Cloudflare Worker. Нужны: KV-хранилище с именем привязки QUEUE и секрет KEY.
+// Cloudflare Worker. Нужно KV-хранилище с именем привязки QUEUE.
+// Ключ: если задан секрет KEY — используется он. Иначе сервер запоминает первый
+// присланный ключ (от 16 символов) и дальше принимает только его.
 //   POST /add   — команда iPhone присылает платёж {amount, merchant}
 //   GET  /list  — приложение забирает платежи
 //   POST /ack   — приложение подтверждает {ids:[...]}, записи удаляются
+//   POST /rekey — замена ключа {key: новый} (с текущим ключом в X-Key)
 // Каждый запрос — с заголовком X-Key: <ключ из настроек приложения>.
 // Неподтверждённые записи сами удаляются через 30 дней.
 
@@ -30,7 +33,18 @@ export default {
     if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
     const url = new URL(req.url);
     const key = req.headers.get('X-Key') || url.searchParams.get('key') || '';
-    if (!env.KEY || key !== env.KEY) return json({ error: 'key' }, 401);
+    let real = env.KEY || await env.QUEUE.get('cfg:key');
+    if (!real && key.length >= 16) { await env.QUEUE.put('cfg:key', key); real = key; }
+    if (!real || key !== real) return json({ error: 'key' }, 401);
+
+    if (url.pathname === '/rekey' && req.method === 'POST') {
+      if (env.KEY) return json({ error: 'secret KEY is set, change it in Cloudflare' }, 409);
+      const b = await body(req);
+      const nk = String(b.key || '');
+      if (nk.length < 16) return json({ error: 'short key' }, 400);
+      await env.QUEUE.put('cfg:key', nk);
+      return json({ ok: true });
+    }
 
     if (url.pathname === '/add' && req.method === 'POST') {
       const b = await body(req);

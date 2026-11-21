@@ -808,7 +808,11 @@ var A={
   'ap-save':function(){var u=String(draft('ap-url',D.ap.url||'')).trim();if(u&&!/^https:\/\/[^\s/]+/.test(u)){toast('Адрес должен начинаться с https://');return}D.ap.url=u;D.ap.err=null;D.ap.last=null;delete UI.d['ap-url'];persist();if(u){toast('Проверяю…');apSync(true)}else toast('Отключено')},
   'ap-sync':function(){toast('Проверяю…');apSync(true)},
   'ap-copy':function(){var k=D.ap.key;try{navigator.clipboard.writeText(k).then(function(){toast('Ключ скопирован')},function(){toast(k)})}catch(e){toast(k)}},
-  'ap-newkey':function(){if(!UI.apKeyArm){UI.apKeyArm=true;setTimeout(function(){UI.apKeyArm=false;render()},5000);return}UI.apKeyArm=false;D.ap.key=randKey();D.ap.err=null;persist();toast('Новый ключ создан — замени его в Cloudflare и в команде')},
+  'ap-newkey':function(){if(!UI.apKeyArm){UI.apKeyArm=true;setTimeout(function(){UI.apKeyArm=false;render()},5000);return}UI.apKeyArm=false;
+    var nk=randKey();if(!apBase()){D.ap.key=nk;persist();toast('Новый ключ создан');return}
+    fetch(apBase()+'/rekey',{method:'POST',headers:{'X-Key':D.ap.key,'Content-Type':'application/json'},body:JSON.stringify({key:nk})}).then(function(r){
+      if(!r.ok)throw 0;D.ap.key=nk;D.ap.err=null;flush();render();toast('Ключ заменён — обнови его в команде iPhone');
+    }).catch(function(){toast('Не удалось сменить ключ: нет связи с сервером')})},
   'ed-close':function(){UI.editor=null},
   'ed-type':function(el){var E=UI.editor;if(E.type!==el.dataset.val){E.type=el.dataset.val;if(E.cat&&C.cat[E.cat]&&C.cat[E.cat].type!==E.type)E.cat=null;E.catParent=null;if(E.panel==='cat')E.panel='cat'}return 'ov'},
   'ed-panel':function(el){var E=UI.editor,p=el.dataset.val;E.panel=E.panel===p?null:p;if(p==='cat')E.catParent=null;return 'ov'},
