@@ -1012,12 +1012,14 @@ function statsPing(){
   var mark=today()+'|'+APP_VERSION;if(lsGet('budget-ping')===mark)return;
   fetch(STATS_URL+'/ping',{method:'POST',body:JSON.stringify({id:id,v:APP_VERSION}),keepalive:true}).then(function(r){if(r.ok)lsSet('budget-ping',mark)}).catch(function(){});
 }
-function statsLoad(){
+/* the screen opens only for the owner: other devices get no reaction (401 → silence) */
+function statsLoad(open){
   var k=lsGet('budget-admin');if(!k){k=randKey()+randKey();lsSet('budget-admin',k)}
-  UI.stats={busy:true};render();
+  if(UI.statsBusy)return;UI.statsBusy=true;if(!open){UI.stats={busy:true};render()}
   fetch(STATS_URL+'/stats',{headers:{'X-Key':k},cache:'no-store'}).then(function(r){if(r.status===401)throw new Error('key');if(!r.ok)throw new Error('http');return r.json()})
-    .then(function(j){UI.stats={data:j}}).catch(function(e){UI.stats={err:e&&e.message==='key'?'Доступ закрыт: статистику уже открыли с другого устройства.':'Нет связи с сервером статистики.'}})
-    .then(function(){if(UI.setView==='stats')render()});
+    .then(function(j){UI.stats={data:j};if(open){UI.setView='stats';window.scrollTo(0,0)}})
+    .catch(function(e){if(open||(e&&e.message==='key')){if(UI.setView==='stats')UI.setView=null;return}UI.stats={err:'Нет связи с сервером статистики.'}})
+    .then(function(){UI.statsBusy=false;if(UI.tab==='settings'&&!UI.editor)render()});
 }
 function viewStatsAdmin(){
   var h=subTop('Статистика'),st=UI.stats||{};
@@ -1130,8 +1132,8 @@ var A={
   'set-back':function(){UI.setView=null;window.scrollTo(0,0)},
   'open-ap':function(){UI.setView='ap';window.scrollTo(0,0)},
   'open-pin':function(){UI.setView='pin';window.scrollTo(0,0)},
-  'ver-tap':function(){var n=Date.now();UI.vt=(UI.vt||[]).filter(function(t){return n-t<3000});UI.vt.push(n);if(UI.vt.length>=5){UI.vt=[];UI.setView='stats';window.scrollTo(0,0);statsLoad();return}return 'ov'},
-  'stats-reload':function(){statsLoad()},
+  'ver-tap':function(){var n=Date.now();UI.vt=(UI.vt||[]).filter(function(t){return n-t<3000});UI.vt.push(n);if(UI.vt.length>=5){UI.vt=[];statsLoad(true)}return 'ov'},
+  'stats-reload':function(){statsLoad(false)},
   'open-lim':function(){UI.setView='lim';window.scrollTo(0,0)},
   'open-imp':function(){UI.setView='imp';window.scrollTo(0,0)},
   'open-bak':function(){UI.setView='bak';window.scrollTo(0,0)},
