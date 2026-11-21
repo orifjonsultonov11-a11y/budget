@@ -1,7 +1,7 @@
 /* Мой бюджет — учёт доходов/расходов + дневной лимит. Данные хранятся только на этом устройстве. */
 (function(){
 'use strict';
-var APP_VERSION=6; /* = version in version.json and CACHE in sw.js */
+var APP_VERSION=7; /* = version in version.json and CACHE in sw.js */
 var app=document.getElementById('app'),ov=document.getElementById('ov'),tipEl=document.getElementById('tip'),toastEl=document.getElementById('toast');
 
 /* ================= utils ================= */
@@ -753,8 +753,24 @@ function viewPinSet(){
   h+='<button class="btn ghost block danger" data-act="pin-off">Выключить пароль</button>';
   return wrap(h);
 }
+function viewImp(){var h=subTop('Импорт');
+  h+='<div class="card"><p class="small">Выбери свежий файл резервной копии (.mmbak). Операции и категории заменятся данными из файла, настройки лимита останутся.'+(D.importedAt?' Последний импорт: '+shortDate(D.importedAt)+'.':'')+'</p><label class="btn ghost block mt filebtn">Выбрать файл .mmbak<input type="file" data-file="mm" hidden></label>'+(UI.pendingKind==='mm'?pendingBox():'')+'</div>';
+  return wrap(h);
+}
+function viewBak(){var h=subTop('Резервная копия');
+  h+='<div class="card"><p class="small">Данные хранятся только на этом телефоне. Если удалить иконку приложения, они пропадут — сохраняй копию в «Файлы» или iCloud Drive.</p><p class="small">'+(D.lastBackup?'Последняя копия: '+longDate(D.lastBackup):'Копию ещё не сохраняли.')+'</p>'+
+    '<button class="btn block mt" data-act="export">Сохранить копию</button><label class="btn ghost block mt filebtn">Восстановить из файла<input type="file" accept="application/json,.json,text/plain" data-file="backup" hidden></label>'+(UI.pendingKind==='backup'?pendingBox():'')+'</div>';
+  return wrap(h);
+}
+function viewLim(){var h=subTop('Лимит');
+  h+=D.limit?limitCard():'<p class="sub">Задай сумму на период — приложение посчитает лимит на каждый день.</p>'+viewLimitSetup();
+  return wrap(h);
+}
 function viewSettings(){
   if(UI.setView==='cats')return viewCats();
+  if(UI.setView==='lim')return viewLim();
+  if(UI.setView==='imp')return viewImp();
+  if(UI.setView==='bak')return viewBak();
   if(UI.setView==='ap')return viewAp();
   if(UI.setView==='pin')return viewPinSet();
   var h='<h1>Настройки</h1><p class="sub">&nbsp;</p>';
@@ -763,15 +779,15 @@ function viewSettings(){
       rel.map(function(r){return '<div class="label mt">Версия '+r.v+(r.date?' · '+shortDate(r.date):'')+'</div><ul class="notes">'+(r.notes||[]).map(function(n){return '<li>'+esc(n)+'</li>'}).join('')+'</ul>'}).join('')+
       '<button class="btn block mt" data-act="do-update"'+(UI.updating?' disabled':'')+'>'+(UI.updating?'Обновляю…':'Обновить')+'</button><p class="small">Данные не пропадут.</p></div>';
   }
-  if(D.limit)h+=limitCard();
-  var ex=tops('exp'),inL=ex.filter(function(c){return !c.nl}).length;
-  h+='<div class="card"><h3>Категории</h3><p class="small">Расходов: '+ex.length+', доходов: '+tops('inc').length+'. В дневном лимите учитываются '+inL+' из '+ex.length+' категорий расходов.</p><button class="btn ghost block mt" data-act="open-cats">Категории и лимит →</button></div>';
+  var ex=tops('exp'),inL=ex.filter(function(c){return !c.nl}).length,lp=null;
+  if(D.limit){var la=compute(),ll=locate(la,today());lp=ll.cur||ll.ended||la[la.length-1]}
+  h+=navRow('open-lim','Лимит',lp?range(lp)+' · '+fmt(lp.limit)+' сум':'Не настроен');
+  h+=navRow('open-cats','Категории','В лимите '+inL+' из '+ex.length+' категорий расходов');
   h+=navRow('open-ap','Apple Pay',apStatus());
-  h+='<div class="card"><h3>Импорт из «Умного счёта»</h3><p class="small">Выбери свежий файл резервной копии (.mmbak). Операции и категории заменятся данными из файла, настройки лимита останутся.'+(D.importedAt?' Последний импорт: '+shortDate(D.importedAt)+'.':'')+'</p><label class="btn ghost block mt filebtn">Выбрать файл .mmbak<input type="file" data-file="mm" hidden></label>'+(UI.pendingKind==='mm'?pendingBox():'')+'</div>';
-  h+='<div class="card"><h3>Резервная копия</h3><p class="small">Данные хранятся только на этом телефоне. Если удалить иконку приложения, они пропадут — сохраняй копию в «Файлы» или iCloud Drive.</p><p class="small">'+(D.lastBackup?'Последняя копия: '+longDate(D.lastBackup):'Копию ещё не сохраняли.')+'</p>'+
-    '<button class="btn block mt" data-act="export">Сохранить копию</button><label class="btn ghost block mt filebtn">Восстановить из файла<input type="file" accept="application/json,.json,text/plain" data-file="backup" hidden></label>'+(UI.pendingKind==='backup'?pendingBox():'')+'</div>';
   h+=navRow('open-pin','Пароль',SEC.pin?'<span class="pos">Включён</span>'+(SEC.fid?' · Face ID':''):'Выключен');
   if(!isStandalone())h+='<div class="card"><h3>Установка на iPhone</h3><p class="small">Открой страницу в Safari → «Поделиться» → «На экран „Домой“». Дальше запускай с иконки — работает без интернета.</p></div>';
+  h+=navRow('open-imp','Импорт из «Умного счёта»',D.importedAt?'Последний импорт: '+shortDate(D.importedAt):'Перенести операции из файла .mmbak');
+  h+=navRow('open-bak','Резервная копия',D.lastBackup?'Последняя копия: '+shortDate(D.lastBackup):'<span class="neg">Копию ещё не сохраняли</span>');
   h+='<button class="btn ghost block danger" data-act="reset">'+(UI.resetArm?'Точно удалить всё? Нажми ещё раз':'Удалить все данные')+'</button>';
   h+='<p class="small" style="text-align:center;margin-top:16px">Версия '+APP_VERSION+'</p>';
   return wrap(h);
@@ -1016,6 +1032,9 @@ var A={
   'set-back':function(){UI.setView=null;window.scrollTo(0,0)},
   'open-ap':function(){UI.setView='ap';window.scrollTo(0,0)},
   'open-pin':function(){UI.setView='pin';window.scrollTo(0,0)},
+  'open-lim':function(){UI.setView='lim';window.scrollTo(0,0)},
+  'open-imp':function(){UI.setView='imp';window.scrollTo(0,0)},
+  'open-bak':function(){UI.setView='bak';window.scrollTo(0,0)},
   sp:function(el){UI.sp=el.dataset.val},
   snav:function(el){var n=+el.dataset.val,a=UI.sAnchor;UI.sAnchor=UI.sp==='week'?addDays(a,7*n):UI.sp==='year'?((+a.slice(0,4)+n)+'-01-01'):(addMonths(mkOf(a),n)+'-01')},
   stype:function(el){UI.sType=el.dataset.val;UI.sCat=null},
