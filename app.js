@@ -1,7 +1,7 @@
 /* Мой бюджет — учёт доходов/расходов + дневной лимит. Данные хранятся только на этом устройстве. */
 (function(){
 'use strict';
-var APP_VERSION=5; /* = version in version.json and CACHE in sw.js */
+var APP_VERSION=6; /* = version in version.json and CACHE in sw.js */
 var app=document.getElementById('app'),ov=document.getElementById('ov'),tipEl=document.getElementById('tip'),toastEl=document.getElementById('toast');
 
 /* ================= utils ================= */
@@ -926,6 +926,10 @@ document.addEventListener('change',function(e){
 document.addEventListener('focusin',function(e){var ed=document.getElementById('ed');if(ed&&e.target.matches&&e.target.matches('[data-e="note"],[data-e="memo"]'))ed.classList.add('typing')});
 document.addEventListener('focusout',function(e){var ed=document.getElementById('ed');if(ed&&e.target.matches&&e.target.matches('[data-e="note"],[data-e="memo"]'))setTimeout(function(){var a=document.activeElement;if(!(a&&a.matches&&a.matches('[data-e="note"],[data-e="memo"]')))ed.classList.remove('typing')},50)});
 document.addEventListener('keydown',function(e){if(e.key==='Enter'&&e.target.matches&&e.target.matches('[data-e]')){e.target.blur()}});
+
+/* iOS ignores user-scalable=no: block pinch-zoom by hand */
+['gesturestart','gesturechange','gestureend'].forEach(function(n){document.addEventListener(n,function(e){e.preventDefault()},{passive:false})});
+document.addEventListener('touchmove',function(e){if(e.scale!==undefined&&e.scale!==1)e.preventDefault()},{passive:false});
 
 /* ================= init ================= */
 async function init(){
