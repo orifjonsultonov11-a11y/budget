@@ -1,7 +1,7 @@
 /* Мой бюджет — учёт доходов/расходов + дневной лимит. Данные хранятся только на этом устройстве. */
 (function(){
 'use strict';
-var APP_VERSION=5; /* = version in version.json and CACHE in sw.js */
+var APP_VERSION=6; /* = version in version.json and CACHE in sw.js */
 var app=document.getElementById('app'),ov=document.getElementById('ov'),tipEl=document.getElementById('tip'),toastEl=document.getElementById('toast');
 
 /* ================= utils ================= */
@@ -93,7 +93,11 @@ function idbPut(k,v){return new Promise(function(res,rej){try{var t=idb.transact
 function lsSave(d){try{localStorage.setItem('budget-app-v2',JSON.stringify(d));return true}catch(e){toast('Не удалось сохранить!');return false}}
 function persist(){clearTimeout(saveT);saveT=setTimeout(flush,120)}
 function flush(){clearTimeout(saveT);saveT=null;if(!D)return;var data=clone(D);if(idb)idbPut('state',data).catch(function(){lsSave(data)});else lsSave(data)}
-document.addEventListener('visibilitychange',function(){if(document.hidden&&saveT)flush();else if(!document.hidden)tick()});
+document.addEventListener('visibilitychange',function(){
+  if(document.hidden){UI.hiddenAt=Date.now();if(saveT)flush();return}
+  if(SEC.pin&&UI.hiddenAt&&Date.now()-UI.hiddenAt>LOCK_MS&&!(UI.lock&&UI.lock.mode==='unlock'))lockNow();
+  UI.hiddenAt=0;tick();
+});
 window.addEventListener('pagehide',function(){if(saveT)flush()});
 
 /* ================= Apple Pay ================= */
@@ -127,11 +131,116 @@ function apSync(force){
     });
     if(D.apSeen.length>500)D.apSeen=D.apSeen.slice(-500);
     D.ap.last=Date.now();D.ap.err=null;rebuild();flush();
-    if(added||wait)toast('Apple Pay: '+(added?'добавлено '+added:'')+(added&&wait?', ':'')+(wait?'ждут категорию '+wait:''));
+    if((added||wait)&&!UI.lock)toast('Apple Pay: '+(added?'добавлено '+added:'')+(added&&wait?', ':'')+(wait?'ждут категорию '+wait:''));
     if(!UI.editor)render();
     if(ids.length)return fetch(base+'/ack',{method:'POST',headers:{'X-Key':key,'Content-Type':'application/json'},body:JSON.stringify({ids:ids})}).catch(function(){});
   }).catch(function(e){D.ap.err=(e&&e.message&&/ключ|сервер/.test(e.message))?e.message:'Нет связи с сервером';if(force&&!UI.editor)render()})
   .then(function(){apBusy=false});
+}
+
+/* ================= password & Face ID ================= */
+/* stored apart from D (key 'sec'): not in backups, survives «Удалить все данные» */
+var SEC={},LOCK_MS=4*60*1000;
+function b64(buf){var u=new Uint8Array(buf),s='';for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s)}
+function unb64(s){var b=atob(s),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u}
+function rnd(n){var u=new Uint8Array(n);crypto.getRandomValues(u);return u}
+async function kdf(secret,salt){var k=await crypto.subtle.importKey('raw',new TextEncoder().encode(secret),'PBKDF2',false,['deriveBits']);return b64(await crypto.subtle.deriveBits({name:'PBKDF2',salt:unb64(salt),iterations:150000,hash:'SHA-256'},k,256))}
+async function mkHash(secret){var salt=b64(rnd(16));return{salt:salt,hash:await kdf(secret,salt)}}
+async function checkHash(secret,h){return !!h&&(await kdf(secret,h.salt))===h.hash}
+function secSave(){try{localStorage.setItem('budget-sec',JSON.stringify(SEC))}catch(e){}if(idb)idbPut('sec',clone(SEC)).catch(function(){})}
+function lockNow(){if(!SEC.pin)return;UI.lock={mode:'unlock',buf:''};render();if(SEC.fid)setTimeout(function(){fidUnlock(true)},350)}
+function confirmPin(title,fn){if(!SEC.pin){fn();return}UI.lock={mode:'confirm',title:title,then:fn,buf:''}}
+function waitLeft(r){return Math.max(0,Math.ceil((((r?SEC.runtil:SEC.until)||0)-Date.now())/1000))}
+function failed(L,msg,r){var f=r?'rfails':'fails',u=r?'runtil':'until';SEC[f]=(SEC[f]||0)+1;if(SEC[f]%5===0){SEC[u]=Date.now()+30000;setTimeout(render,30100)}secSave();L.err=msg;L.buf='';L.shake=true}
+function pinKey(k){
+  var L=UI.lock;if(!L||L.busy)return;L.shake=false;
+  if(k==='del'){L.buf=L.buf.slice(0,-1);return}
+  if((L.mode==='unlock'||L.mode==='confirm')&&waitLeft())return;
+  if(L.buf.length>=4)return;L.buf+=k;L.err=null;
+  if(L.buf.length<4)return;
+  var v=L.buf;
+  if(L.mode==='new'){
+    if(L.step===1){L.first=v;L.step=2;L.buf='';return}
+    if(v!==L.first){L.step=1;L.buf='';L.first=null;L.err='Пароли не совпали, введи заново';L.shake=true;return}
+    if(L.setup){UI.lock={mode:'recset',setup:true,pinTmp:v};return}
+    L.busy=true;mkHash(v).then(function(h){SEC.pin=h;SEC.fails=0;SEC.until=0;secSave();var rec=L.afterRecover;UI.lock=null;toast(rec?'Новый пароль сохранён':'Пароль изменён');render()});
+    return;
+  }
+  L.busy=true;
+  checkHash(v,SEC.pin).then(function(ok){
+    L.busy=false;
+    if(ok){SEC.fails=0;SEC.until=0;secSave();var fn=L.mode==='confirm'?L.then:null;UI.lock=null;if(fn)fn();}
+    else failed(L,'Неверный пароль');
+    render();
+  });
+}
+async function recCheck(){
+  var L=UI.lock,v=String(UI.d['rec-in']||'');if(!L||L.busy)return;
+  if(waitLeft(1)){render();return}
+  if(!v){L.err='Введи пароль восстановления';render();return}
+  L.busy=true;render();var ok=await checkHash(v,SEC.rec);L.busy=false;delete UI.d['rec-in'];
+  if(ok){SEC.fails=0;SEC.until=0;SEC.rfails=0;SEC.runtil=0;secSave();UI.lock={mode:'new',step:1,buf:'',forced:true,afterRecover:true}}
+  else failed(L,'Неверный пароль восстановления',1);
+  render();
+}
+async function recSave(){
+  var L=UI.lock,a=String(UI.d.rec1||''),b=String(UI.d.rec2||'');if(!L||L.busy)return;
+  if(a.length<6){L.err='Не короче 6 символов';render();return}
+  if(a!==b){L.err='Пароли не совпали';render();return}
+  L.busy=true;render();
+  var rec=await mkHash(a);
+  if(L.setup){SEC={pin:await mkHash(L.pinTmp),rec:rec,fails:0,until:0}}else SEC.rec=rec;
+  secSave();delete UI.d.rec1;delete UI.d.rec2;UI.lock=null;
+  toast(L.setup?'Пароль включён':'Пароль восстановления изменён');render();
+}
+function fidAvail(){return !!(window.PublicKeyCredential&&navigator.credentials&&window.isSecureContext&&window.crypto&&crypto.subtle)}
+async function fidEnable(){
+  try{
+    var c=await navigator.credentials.create({publicKey:{challenge:rnd(32),rp:{name:'Мой бюджет'},user:{id:rnd(16),name:'Мой бюджет',displayName:'Мой бюджет'},
+      pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],authenticatorSelection:{authenticatorAttachment:'platform',userVerification:'required',residentKey:'preferred'},timeout:60000,attestation:'none'}});
+    SEC.fid=b64(c.rawId);secSave();toast('Face ID включён');
+  }catch(e){toast('Face ID не включён'+(e&&e.name==='NotAllowedError'?': отменено':''))}
+  render();
+}
+async function fidUnlock(auto){
+  var L=UI.lock;if(!SEC.fid||!L||L.mode!=='unlock'||L.fidBusy)return;
+  L.fidBusy=true;
+  try{
+    var a=await navigator.credentials.get({publicKey:{challenge:rnd(32),allowCredentials:[{type:'public-key',id:unb64(SEC.fid),transports:['internal','hybrid']}],userVerification:'required',timeout:60000}});
+    if(!(new Uint8Array(a.response.authenticatorData)[32]&4))throw new Error('uv');
+    if(UI.lock===L){SEC.fails=0;SEC.until=0;secSave();UI.lock=null}
+  }catch(e){if(!auto&&UI.lock===L)L.err='Face ID не сработал — введи пароль'}
+  L.fidBusy=false;render();
+}
+function viewLock(){
+  var L=UI.lock,h='<div class="lockin">',w=waitLeft(L.mode==='recover');
+  if(L.mode==='recover'||L.mode==='recset'){
+    if(L.mode==='recover')h+='<h2>Пароль восстановления</h2><p class="small">Введи пароль восстановления, затем задашь новый пароль из 4 цифр.</p><input class="in wide mt2" type="password" data-k="rec-in" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go">';
+    else h+='<h2>'+(L.setup?'Пароль восстановления':'Новый пароль восстановления')+'</h2><p class="small">Нужен, если забудешь пароль из 4 цифр. Других способов войти нет — запиши его в надёжном месте.</p>'+
+      '<input class="in wide mt2" type="password" data-k="rec1" placeholder="Не короче 6 символов" autocomplete="off" autocapitalize="off" spellcheck="false"><input class="in wide mt" type="password" data-k="rec2" placeholder="Повтори" autocomplete="off" autocapitalize="off" spellcheck="false">';
+    h+='<div class="lerr">'+(w?'Слишком много попыток. Подожди '+w+' с':esc(L.err||''))+'</div>';
+    h+='<button class="btn block" data-act="'+(L.mode==='recover'?'rec-check':'rec-save')+'"'+(L.busy?' disabled':'')+'>'+(L.busy?'Проверяю…':L.mode==='recover'?'Войти':'Сохранить')+'</button>';
+    h+='<button class="link" data-act="'+(L.mode==='recover'?'pin-back':'pin-cancel')+'">'+(L.mode==='recover'?'Назад':'Отмена')+'</button>';
+    return h+'</div>';
+  }
+  var title=L.mode==='unlock'?'Введи пароль':L.mode==='confirm'?(L.title||'Подтверди паролем'):L.step===1?(L.afterRecover?'Придумай новый пароль':'Придумай пароль из 4 цифр'):'Повтори пароль';
+  h+='<div class="lico">'+I.lock+'</div><h2>'+esc(title)+'</h2><div class="pindots'+(L.shake?' shake':'')+'">';
+  for(var i=0;i<4;i++)h+='<i class="'+(i<L.buf.length?'on':'')+'"></i>';
+  h+='</div><div class="lerr">'+(w&&(L.mode==='unlock'||L.mode==='confirm')?'Слишком много попыток. Подожди '+w+' с':esc(L.err||''))+'</div><div class="pinpad">';
+  function k(v,l,c){return '<button class="'+(c||'')+'" data-act="pin-key" data-val="'+v+'">'+(l||v)+'</button>'}
+  for(var d=1;d<=9;d++)h+=k(String(d));
+  h+=(L.mode==='unlock'&&SEC.fid?'<button class="fn" data-act="fid-go" aria-label="Face ID">'+I.face+'</button>':'<span></span>')+k('0')+k('del',I.del,'fn');
+  h+='</div>';
+  if(L.mode==='unlock'&&(SEC.fails||0)>=5)h+='<button class="link" data-act="pin-forgot">Забыли пароль?</button>';
+  if(L.mode!=='unlock'&&!L.forced)h+='<button class="link" data-act="pin-cancel">Отмена</button>';
+  return h+'</div>';
+}
+function renderLock(){
+  var el=document.getElementById('lock');if(!el){el=document.createElement('div');el.id='lock';document.body.appendChild(el)}
+  if(!UI.lock){if(el.innerHTML){el.innerHTML='';el.className=''}document.documentElement.classList.remove('locked');return}
+  var ae=document.activeElement,k=ae&&el.contains(ae)&&ae.dataset?ae.dataset.k:null;
+  el.className='on';el.innerHTML=viewLock();document.documentElement.classList.add('locked');
+  if(k){var f=el.querySelector('[data-k="'+k+'"]');if(f)try{f.focus({preventScroll:true})}catch(e){}}
 }
 
 /* ================= limit engine ================= */
@@ -185,6 +294,9 @@ var I={
   r:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>',
   search:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4-4"/></svg>',
   trash:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
+  lock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg>',
+  face:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M9 9v1.5M15 9v1.5M12 9v4h-1M9.5 16a3.5 3.5 0 0 0 5 0"/></svg>',
+  del:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6-7z"/><path d="M12 9.5l5 5M17 9.5l-5 5"/></svg>',
   back:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 6l-6 6 6 6"/></svg>'
 };
 
@@ -356,7 +468,6 @@ function viewLimitSetup(){
   return '<div class="card"><div class="label">Сумма на период</div>'+
     '<div class="row" style="border:0"><input class="in wide" data-k="ob-limit" data-money inputmode="numeric" placeholder="2 500 000" value="'+money('ob-limit')+'"></div>'+
     '<div class="label mt">Период</div><div class="seg mt">'+seg('dseg','month','Месяц',mode,' data-key="ob-mode"')+seg('dseg','custom','Свои даты',mode,' data-key="ob-mode"')+'</div>'+per+
-    '<div class="row"><span>Перенос с прошлого<br><small>необязательно</small></span><div class="carry"><div class="seg mini">'+seg('dseg','+','+',sign,' data-key="ob-sign"')+seg('dseg','-','−',sign,' data-key="ob-sign"')+'</div><input class="in" data-k="ob-carry" data-money inputmode="numeric" placeholder="0" value="'+money('ob-carry')+'"></div></div>'+
     '<button class="btn block mt2" data-act="limit-start">Начать</button></div>';
 }
 function backupNag(){
@@ -602,37 +713,64 @@ function viewStatCat(){
 }
 
 /* ================= settings ================= */
+function navRow(act,title,sub){return '<button class="card navrow" data-act="'+act+'"><span><b>'+title+'</b><span class="small">'+sub+'</span></span>'+I.r+'</button>'}
+function subTop(title){return '<div class="topbar" style="justify-content:flex-start"><button class="icon solid" data-act="set-back" aria-label="Назад">'+I.back+'</button><h1 style="margin-top:4px;font-size:26px">'+title+'</h1></div>'}
+function apStatus(){var ap=D.ap;return !apBase()?'Не подключено':ap.err?'<span class="neg">Ошибка: '+esc(ap.err)+'</span>':ap.last?'<span class="pos">Подключено</span> · проверено '+(localDay(ap.last)===today()?'сегодня':shortDate(localDay(ap.last)))+' в '+hm(ap.last):'Ещё не проверено'}
+function limitCard(){
+  var st=D.limit,all=compute(),loc=locate(all,today()),p=loc.cur||loc.ended||all[all.length-1],mode=draft('lim-mode',st.mode);
+  var tail=st.mode==='month'?'следующий начнётся '+shortDate(addDays(p.end,1)):'после '+shortDate(p.end)+' новый период задашь на вкладке «Лимит»';
+  function opt(m,inner){return '<div class="opt'+(mode===m?' on':'')+'" data-opt="'+m+'"><button class="radio" data-act="lim-mode" data-val="'+m+'" aria-label="Выбрать"><i></i></button><div class="optb">'+inner+'</div></div>'}
+  return '<div class="card"><h3>Лимит</h3>'+
+    '<div class="limhead"><b>'+range(p)+'</b> · '+p.N+' '+plural(p.N,'день','дня','дней')+'<span class="small">≈ '+fmt(p.limit/p.N)+' сум в день · '+tail+'</span></div>'+
+    '<div class="row"><span>Сумма на период</span><input class="in" data-k="lim-sum" data-money inputmode="numeric" value="'+money('lim-sum',p.limit)+'"></div>'+
+    '<div class="label mt2">Период</div>'+
+    opt('month','<span data-act="lim-mode" data-val="month">Каждый месяц с</span><input class="in xs" data-mode="month" data-k="lim-day" inputmode="numeric" maxlength="2" value="'+esc(draft('lim-day',String(st.startDay||12)))+'"><span data-act="lim-mode" data-val="month">числа</span>')+
+    opt('custom','<span data-act="lim-mode" data-val="custom">Свои даты</span><span class="dates"><label>с <input class="in dt" type="date" data-mode="custom" data-k="lim-start" value="'+draft('lim-start',p.start)+'"></label><label>по <input class="in dt" type="date" data-mode="custom" data-k="lim-end" value="'+draft('lim-end',p.end)+'"></label></span>')+
+    '<button class="btn block mt2" data-act="lim-save">Сохранить</button><p class="small">Лимит на день и остатки пересчитаются за весь текущий период.</p></div>';
+}
+function viewAp(){
+  var ap=D.ap,h=subTop('Apple Pay');
+  h+='<div class="card"><p class="small" style="margin-top:0">Оплаты телефоном сами попадают в расходы: команда iPhone отправляет их на твой сервер Cloudflare, приложение забирает при открытии. Знакомый магазин записывается в свою последнюю категорию, новый — ждёт выбора вверху вкладки «Операции».</p>'+
+    '<p class="small">Статус: '+apStatus()+'</p>'+
+    '<div class="label mt">Адрес сервера</div><input class="in wide mt" data-k="ap-url" value="'+esc(draft('ap-url',ap.url||''))+'" placeholder="https://budget-pay.имя.workers.dev" autocomplete="off" autocapitalize="off" spellcheck="false">'+
+    '<div class="btnrow mt"><button class="btn sm" data-act="ap-save">Сохранить</button>'+(apBase()?'<button class="btn sm ghost" data-act="ap-sync">Проверить</button>':'')+'</div>'+
+    '<div class="label mt2">Ключ доступа</div><div class="row" style="border:0"><code class="key">'+esc(ap.key)+'</code></div>'+
+    '<div class="btnrow"><button class="btn sm ghost" data-act="ap-copy">Скопировать</button><button class="btn sm ghost'+(UI.apKeyArm?' danger':'')+'" data-act="ap-newkey">'+(UI.apKeyArm?'Точно заменить?':'Новый ключ')+'</button></div>'+
+    '<p class="small">Ключ вставляется в команду iPhone (заголовок X-Key). Никому его не показывай.</p></div>';
+  return wrap(h);
+}
+function viewPinSet(){
+  var h=subTop('Пароль');
+  if(!SEC.pin){
+    h+='<div class="card"><p class="small" style="margin-top:0">Пароль из 4 цифр закрывает приложение при запуске и после того, как оно было свёрнуто дольше 4 минут. Им же подтверждается удаление всех данных, восстановление из копии и импорт.</p>'+
+      '<p class="small">Понадобится и пароль восстановления: он нужен, если забудешь основной. Других способов войти нет.</p><button class="btn block mt2" data-act="pin-on">Включить пароль</button></div>';
+    return wrap(h);
+  }
+  h+='<div class="card"><div class="row" style="border:0;padding-top:0"><span>Пароль</span><b class="pos">Включён</b></div>'+
+    '<button class="btn ghost block mt" data-act="pin-change">Изменить пароль</button>'+
+    '<button class="btn ghost block mt" data-act="rec-change">Изменить пароль восстановления</button></div>';
+  if(fidAvail())h+='<div class="card"><div class="row" style="border:0;padding:0"><span>Вход по Face ID<br><small>Пароль из 4 цифр останется запасным</small></span><button class="sw'+(SEC.fid?' on':'')+'" data-act="fid-toggle" aria-label="Face ID"></button></div></div>';
+  h+='<button class="btn ghost block danger" data-act="pin-off">Выключить пароль</button>';
+  return wrap(h);
+}
 function viewSettings(){
   if(UI.setView==='cats')return viewCats();
+  if(UI.setView==='ap')return viewAp();
+  if(UI.setView==='pin')return viewPinSet();
   var h='<h1>Настройки</h1><p class="sub">&nbsp;</p>';
   if(UI.upd){var rel=(UI.upd.releases||[]).filter(function(r){return r.v>APP_VERSION});
     h+='<div class="card upd"><h3>Доступно обновление · версия '+UI.upd.version+'</h3><p class="small">Сейчас установлена версия '+APP_VERSION+'.</p>'+
       rel.map(function(r){return '<div class="label mt">Версия '+r.v+(r.date?' · '+shortDate(r.date):'')+'</div><ul class="notes">'+(r.notes||[]).map(function(n){return '<li>'+esc(n)+'</li>'}).join('')+'</ul>'}).join('')+
       '<button class="btn block mt" data-act="do-update"'+(UI.updating?' disabled':'')+'>'+(UI.updating?'Обновляю…':'Обновить')+'</button><p class="small">Данные не пропадут.</p></div>';
   }
-  if(D.limit){
-    var st=D.limit,all=compute(),loc=locate(all,today()),p=loc.cur||loc.ended||all[all.length-1],sign=draft('set-sign',(+st.initialCarry||0)<0?'-':'+');
-    h+='<div class="card"><h3>Лимит</h3><div class="label mt">Текущий период · '+range(p)+'</div>'+
-      '<div class="row"><span>Сумма на период</span><input class="in" data-k="set-limit" data-money inputmode="numeric" value="'+money('set-limit',p.limit)+'"></div>'+
-      (st.mode==='custom'?'<div class="row"><span>Конец периода</span><input class="in" type="date" data-k="set-end" value="'+draft('set-end',p.end)+'"></div>':'')+
-      '<button class="btn block mt" data-act="save-period">Сохранить</button><p class="small">Лимит на день и остатки пересчитаются за весь период.</p>'+
-      '<div class="label mt2">Как считать период</div><div class="seg mt">'+seg('lmode','month','Месяц',st.mode)+seg('lmode','custom','Свои даты',st.mode)+'</div>'+
-      (st.mode==='month'?'<div class="row"><span>Месяц начинается с числа</span><div class="carry"><input class="in xs" data-k="set-day" inputmode="numeric" value="'+esc(draft('set-day',String(st.startDay||12)))+'"><button class="btn sm ghost" data-act="save-day">OK</button></div></div>':'')+
-      '<div class="row"><span>Перенос до первого периода</span><div class="carry"><div class="seg mini">'+seg('dseg','+','+',sign,' data-key="set-sign"')+seg('dseg','-','−',sign,' data-key="set-sign"')+'</div><input class="in" style="width:100px" data-k="set-carry" data-money inputmode="numeric" value="'+money('set-carry',Math.abs(+st.initialCarry||0))+'"><button class="btn sm ghost" data-act="save-carry">OK</button></div></div></div>';
-  }
-  var ap=D.ap,st2=!apBase()?'Не подключено':ap.err?'<span class="neg">'+esc(ap.err)+'</span>':ap.last?'<span class="pos">Подключено</span> · проверено '+(localDay(ap.last)===today()?'сегодня':shortDate(localDay(ap.last)))+' в '+hm(ap.last):'Ещё не проверено';
-  h+='<div class="card"><h3>Apple Pay</h3><p class="small">Оплаты телефоном сами попадают в расходы: команда iPhone отправляет их на твой сервер Cloudflare, приложение забирает при открытии. Знакомый магазин записывается в свою последнюю категорию, новый — ждёт выбора на вкладке «Операции».</p>'+
-    '<p class="small">Статус: '+st2+'</p>'+
-    '<div class="label mt">Адрес сервера</div><input class="in wide mt" data-k="ap-url" value="'+esc(draft('ap-url',ap.url||''))+'" placeholder="https://budget-pay.имя.workers.dev" autocomplete="off" autocapitalize="off" spellcheck="false">'+
-    '<div class="btnrow mt"><button class="btn sm" data-act="ap-save">Сохранить</button>'+(apBase()?'<button class="btn sm ghost" data-act="ap-sync">Проверить</button>':'')+'</div>'+
-    '<div class="label mt2">Ключ доступа</div><div class="row" style="border:0"><code class="key">'+esc(ap.key)+'</code></div>'+
-    '<div class="btnrow"><button class="btn sm ghost" data-act="ap-copy">Скопировать</button><button class="btn sm ghost'+(UI.apKeyArm?' danger':'')+'" data-act="ap-newkey">'+(UI.apKeyArm?'Точно заменить?':'Новый ключ')+'</button></div>'+
-    '<p class="small">Ключ нужен в двух местах: в настройках сервера (секрет KEY) и в команде (заголовок X-Key). Никому его не показывай.</p></div>';
+  if(D.limit)h+=limitCard();
   var ex=tops('exp'),inL=ex.filter(function(c){return !c.nl}).length;
   h+='<div class="card"><h3>Категории</h3><p class="small">Расходов: '+ex.length+', доходов: '+tops('inc').length+'. В дневном лимите учитываются '+inL+' из '+ex.length+' категорий расходов.</p><button class="btn ghost block mt" data-act="open-cats">Категории и лимит →</button></div>';
+  h+=navRow('open-ap','Apple Pay',apStatus());
   h+='<div class="card"><h3>Импорт из «Умного счёта»</h3><p class="small">Выбери свежий файл резервной копии (.mmbak). Операции и категории заменятся данными из файла, настройки лимита останутся.'+(D.importedAt?' Последний импорт: '+shortDate(D.importedAt)+'.':'')+'</p><label class="btn ghost block mt filebtn">Выбрать файл .mmbak<input type="file" data-file="mm" hidden></label>'+(UI.pendingKind==='mm'?pendingBox():'')+'</div>';
   h+='<div class="card"><h3>Резервная копия</h3><p class="small">Данные хранятся только на этом телефоне. Если удалить иконку приложения, они пропадут — сохраняй копию в «Файлы» или iCloud Drive.</p><p class="small">'+(D.lastBackup?'Последняя копия: '+longDate(D.lastBackup):'Копию ещё не сохраняли.')+'</p>'+
     '<button class="btn block mt" data-act="export">Сохранить копию</button><label class="btn ghost block mt filebtn">Восстановить из файла<input type="file" accept="application/json,.json,text/plain" data-file="backup" hidden></label>'+(UI.pendingKind==='backup'?pendingBox():'')+'</div>';
+  h+=navRow('open-pin','Пароль',SEC.pin?'<span class="pos">Включён</span>'+(SEC.fid?' · Face ID':''):'Выключен');
   if(!isStandalone())h+='<div class="card"><h3>Установка на iPhone</h3><p class="small">Открой страницу в Safari → «Поделиться» → «На экран „Домой“». Дальше запускай с иконки — работает без интернета.</p></div>';
   h+='<button class="btn ghost block danger" data-act="reset">'+(UI.resetArm?'Точно удалить всё? Нажми ещё раз':'Удалить все данные')+'</button>';
   h+='<p class="small" style="text-align:center;margin-top:16px">Версия '+APP_VERSION+'</p>';
@@ -759,7 +897,7 @@ function render(){
     if(UI.tab==='ops'&&UI.search===null)html+='<button class="fab" data-act="add" aria-label="Добавить операцию">+</button>';
     html+=tabbar();
   }
-  app.innerHTML=html;renderOv();
+  app.innerHTML=html;renderOv();renderLock();
   if(k){var el=app.querySelector('[data-k="'+k+'"]');if(el){try{el.focus({preventScroll:true});var n=el.value.length;el.setSelectionRange(n,n)}catch(e){}}}
 }
 function renderOv(){
@@ -856,16 +994,28 @@ var A={
     if(!isDate(e)||e<start){toast('Проверь дату окончания');return}if(!L){toast('Введи сумму');return}
     st.periods.push({start:start,end:e,limit:L});delete UI.d['np-end'];delete UI.d['np-limit'];persist();toast('Новый период начат');
   },
-  'save-period':function(){
-    var st=D.limit,all=compute(),loc=locate(all,today()),p=loc.cur||loc.ended||all[all.length-1],sp=st.periods[p.idx];
-    var L=+digits(draft('set-limit',String(sp.limit)));if(!L){toast('Введи сумму');return}
-    if(st.mode==='custom'){var e=draft('set-end',sp.end),nx=st.periods[p.idx+1];if(!isDate(e)||e<sp.start||(nx&&e>=nx.start)){toast('Проверь дату окончания');return}sp.end=e}
-    sp.limit=L;delete UI.d['set-limit'];delete UI.d['set-end'];persist();toast('Сохранено');
+  'lim-mode':function(el){UI.d['lim-mode']=el.dataset.val},
+  'lim-save':function(){
+    var st=D.limit,all=compute(),loc=locate(all,today()),p=loc.cur||loc.ended||all[all.length-1],ps=st.periods,i=p.idx,sp=ps[i],mode=draft('lim-mode',st.mode);
+    var L=+digits(draft('lim-sum',String(sp.limit)));if(!L){toast('Введи сумму на период');return}
+    if(mode==='month'){
+      var n=parseInt(digits(draft('lim-day',String(st.startDay||12))),10);if(!(n>=1&&n<=31)){toast('Число месяца — от 1 до 31');return}
+      var cur=sp;if(st.mode!=='month'||st.startDay!==n){st.mode='month';st.startDay=n;cur=realign()}
+      cur.limit=L;
+    }else{
+      var a=draft('lim-start',sp.start),b=draft('lim-end',sp.end),prev=ps[i-1],next=ps[i+1];
+      if(!isDate(a)||!isDate(b)||b<a){toast('Проверь даты: конец не раньше начала');return}
+      if(next&&b>=next.start){toast('Конец должен быть раньше '+shortDate(next.start));return}
+      if(prev&&a<=prev.start){toast('Начало должно быть позже '+shortDate(prev.start));return}
+      if(prev)prev.end=addDays(a,-1);
+      st.mode='custom';sp.start=a;sp.end=b;sp.limit=L;
+    }
+    ['lim-mode','lim-sum','lim-day','lim-start','lim-end'].forEach(function(k){delete UI.d[k]});
+    persist();var np=compute(),nl=locate(np,today()),q=nl.cur||nl.ended||np[np.length-1];toast('Сохранено: '+range(q));
   },
-  lmode:function(el){var st=D.limit;if(st.mode===el.dataset.val)return;st.mode=el.dataset.val;if(!st.startDay)st.startDay=12;delete UI.d['set-end'];
-    if(st.mode==='month'){var p=realign();toast('Период: '+range(p))}else toast('Дату окончания можно менять');persist()},
-  'save-day':function(){var n=parseInt(digits(UI.d['set-day']),10);if(!(n>=1&&n<=31)){toast('Число от 1 до 31');return}D.limit.startDay=n;delete UI.d['set-day'];var p=realign();persist();toast(p?'Период: '+range(p):'Сохранено')},
-  'save-carry':function(){var v=+digits(draft('set-carry',String(Math.abs(+D.limit.initialCarry||0))))||0,sg=draft('set-sign',(+D.limit.initialCarry||0)<0?'-':'+');D.limit.initialCarry=sg==='-'?-v:v;delete UI.d['set-carry'];delete UI.d['set-sign'];persist();toast('Сохранено')},
+  'set-back':function(){UI.setView=null;window.scrollTo(0,0)},
+  'open-ap':function(){UI.setView='ap';window.scrollTo(0,0)},
+  'open-pin':function(){UI.setView='pin';window.scrollTo(0,0)},
   sp:function(el){UI.sp=el.dataset.val},
   snav:function(el){var n=+el.dataset.val,a=UI.sAnchor;UI.sAnchor=UI.sp==='week'?addDays(a,7*n):UI.sp==='year'?((+a.slice(0,4)+n)+'-01-01'):(addMonths(mkOf(a),n)+'-01')},
   stype:function(el){UI.sType=el.dataset.val;UI.sCat=null},
@@ -873,6 +1023,18 @@ var A={
   'scat-back':function(){UI.sCat=null},
   'open-cats':function(){UI.setView='cats';window.scrollTo(0,0)},
   'cats-back':function(){UI.setView=null},
+  'pin-on':function(){UI.lock={mode:'new',step:1,setup:true,buf:''}},
+  'pin-change':function(){confirmPin('Введи текущий пароль',function(){UI.lock={mode:'new',step:1,buf:''}})},
+  'rec-change':function(){confirmPin('Введи текущий пароль',function(){UI.lock={mode:'recset'}})},
+  'pin-off':function(){confirmPin('Введи пароль, чтобы выключить',function(){SEC={};secSave();toast('Пароль выключен')})},
+  'fid-toggle':function(){if(SEC.fid){SEC.fid=null;secSave();toast('Face ID выключен');return}fidEnable()},
+  'pin-key':function(el){return pinKey(el.dataset.val)},
+  'pin-cancel':function(){var L=UI.lock;if(L&&L.mode!=='unlock'&&!L.forced){UI.lock=null;['rec1','rec2','rec-in'].forEach(function(k){delete UI.d[k]})}},
+  'pin-forgot':function(){UI.lock={mode:'recover'};delete UI.d['rec-in']},
+  'pin-back':function(){UI.lock={mode:'unlock',buf:''}},
+  'rec-check':function(){recCheck()},
+  'rec-save':function(){recSave()},
+  'fid-go':function(){fidUnlock(false)},
   ctype:function(el){UI.catType=el.dataset.val},
   'cat-limit':function(el){var c=C.cat[el.dataset.id];if(!c)return;var p=c.parent&&C.cat[c.parent];if(p&&p.nl){toast('Сначала включи «'+splitName(p.name).label+'»');return}c.nl=!c.nl;rebuild();persist();return UI.catEdit?'both':undefined},
   'cat-edit':function(el){UI.catEdit={id:el.dataset.id};delete UI.d.cname;return 'ov'},
@@ -894,10 +1056,13 @@ var A={
   'cat-del':function(){var e=UI.catEdit;if(!e.delArm){e.delArm=true;return 'ov'}D.cats=D.cats.filter(function(c){return c.id!==e.id});UI.catEdit=null;rebuild();persist();toast('Удалено')},
   'start-empty':function(){D.cats=defaultCats();rebuild();persist()},
   'imp-cancel':function(){UI.pending=null;UI.pendingKind=null},
-  'imp-ok':function(){applyPending();window.scrollTo(0,0)},
+  'imp-ok':function(){confirmPin('Подтверди замену данных',function(){applyPending();window.scrollTo(0,0)})},
   'export':function(){exportBackup()},
   'do-update':function(){if(UI.updating)return;UI.updating=true;doUpdate()},
-  reset:function(){if(UI.resetArm){D=emptyData();UI.resetArm=false;UI.tab='ops';rebuild();persist();toast('Все данные удалены');return}UI.resetArm=true;setTimeout(function(){if(UI.resetArm){UI.resetArm=false;render()}},5000)}
+  reset:function(){
+    function wipe(){D=normalize(emptyData());UI.resetArm=false;UI.tab='ops';UI.setView=null;rebuild();persist();toast('Все данные удалены')}
+    if(SEC.pin){confirmPin('Подтверди удаление всех данных',wipe);return}
+    if(UI.resetArm){wipe();return}UI.resetArm=true;setTimeout(function(){if(UI.resetArm){UI.resetArm=false;render()}},5000)}
 };
 document.addEventListener('click',function(e){
   var el=e.target.closest('[data-act]');
@@ -923,9 +1088,15 @@ document.addEventListener('change',function(e){
   if(el.dataset&&el.dataset.e==='date'&&UI.editor){UI.editor.date=el.value||today();return}
   if(el.dataset&&el.dataset.file&&el.files&&el.files[0]){handleFile(el.dataset.file,el.files[0]);el.value=''}
 });
+document.addEventListener('focusin',function(e){var m=e.target.dataset&&e.target.dataset.mode;if(m){UI.d['lim-mode']=m;document.querySelectorAll('.opt').forEach(function(o){o.classList.toggle('on',o.dataset.opt===m)})}});
+document.addEventListener('keydown',function(e){if(e.key==='Enter'&&UI.lock){if(e.target.dataset.k==='rec-in')recCheck();else if(e.target.dataset.k==='rec2')recSave()}});
 document.addEventListener('focusin',function(e){var ed=document.getElementById('ed');if(ed&&e.target.matches&&e.target.matches('[data-e="note"],[data-e="memo"]'))ed.classList.add('typing')});
 document.addEventListener('focusout',function(e){var ed=document.getElementById('ed');if(ed&&e.target.matches&&e.target.matches('[data-e="note"],[data-e="memo"]'))setTimeout(function(){var a=document.activeElement;if(!(a&&a.matches&&a.matches('[data-e="note"],[data-e="memo"]')))ed.classList.remove('typing')},50)});
 document.addEventListener('keydown',function(e){if(e.key==='Enter'&&e.target.matches&&e.target.matches('[data-e]')){e.target.blur()}});
+
+/* iOS ignores user-scalable=no: block pinch-zoom by hand */
+['gesturestart','gesturechange','gestureend'].forEach(function(n){document.addEventListener(n,function(e){e.preventDefault()},{passive:false})});
+document.addEventListener('touchmove',function(e){if(e.scale!==undefined&&e.scale!==1)e.preventDefault()},{passive:false});
 
 /* ================= init ================= */
 async function init(){
@@ -936,7 +1107,10 @@ async function init(){
   var fresh=!d;
   D=normalize(d);
   if(fresh){try{var old=JSON.parse(localStorage.getItem('budget-tracker-v1')||'null');if(old&&old.settings&&Array.isArray(old.settings.periods)&&old.settings.periods.length){D.limit=old.settings;persist()}}catch(e){}}
+  var sc=idb?await idbGet('sec'):null;if(!sc){try{sc=JSON.parse(localStorage.getItem('budget-sec')||'null')}catch(e){}}SEC=sc||{};
+  if(SEC.pin)UI.lock={mode:'unlock',buf:''};
   rebuild();reconcile();UI.loaded=true;render();
+  if(SEC.pin&&SEC.fid)setTimeout(function(){fidUnlock(true)},350);
   try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
   if('serviceWorker' in navigator&&location.protocol!=='file:')navigator.serviceWorker.register('sw.js').catch(function(){});
   setInterval(tick,30000);checkUpdate();apSync(true);
