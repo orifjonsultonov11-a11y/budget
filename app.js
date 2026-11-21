@@ -1,7 +1,7 @@
 /* Мой бюджет — учёт доходов/расходов + дневной лимит. Данные хранятся только на этом устройстве. */
 (function(){
 'use strict';
-var APP_VERSION=4; /* = version in version.json and CACHE in sw.js */
+var APP_VERSION=5; /* = version in version.json and CACHE in sw.js */
 var app=document.getElementById('app'),ov=document.getElementById('ov'),tipEl=document.getElementById('tip'),toastEl=document.getElementById('toast');
 
 /* ================= utils ================= */
@@ -54,11 +54,14 @@ var UI={tab:'ops',ov:'days',month:mkOf(today()),year:+today().slice(0,4),calSel:
   d:{},pending:null,pendingKind:null,resetArm:false,loaded:false,focusK:null,lastDay:null,dismiss:{}};
 var C={cat:{},byDate:{},top:{}};
 
+function randKey(){var a=new Uint8Array(18),r='';try{crypto.getRandomValues(a)}catch(e){for(var i=0;i<a.length;i++)a[i]=Math.random()*256}for(var j=0;j<a.length;j++)r+='abcdefghijkmnpqrstuvwxyz23456789'.charAt(a[j]%32);return r}
 function emptyData(){return{v:2,cats:[],tx:[],limit:null,zero:{},lastBackup:null,importedAt:null}}
 function normalize(d){
   d=d||emptyData();
   d.v=2;d.cats=Array.isArray(d.cats)?d.cats:[];d.tx=Array.isArray(d.tx)?d.tx:[];d.zero=d.zero||{};
   if(d.limit&&(!Array.isArray(d.limit.periods)||!d.limit.periods.length))d.limit=null;
+  d.inbox=Array.isArray(d.inbox)?d.inbox:[];d.mcat=d.mcat||{};d.apSeen=Array.isArray(d.apSeen)?d.apSeen:[];
+  d.ap=d.ap||{url:'',key:''};if(!d.ap.key)d.ap.key=randKey();
   return d;
 }
 function rebuild(){
@@ -92,6 +95,44 @@ function persist(){clearTimeout(saveT);saveT=setTimeout(flush,120)}
 function flush(){clearTimeout(saveT);saveT=null;if(!D)return;var data=clone(D);if(idb)idbPut('state',data).catch(function(){lsSave(data)});else lsSave(data)}
 document.addEventListener('visibilitychange',function(){if(document.hidden&&saveT)flush();else if(!document.hidden)tick()});
 window.addEventListener('pagehide',function(){if(saveT)flush()});
+
+/* ================= Apple Pay ================= */
+/* Shortcuts «Транзакция» -> Cloudflare Worker queue (worker/worker.js) -> here.
+   Known merchant -> saved at once in its last category; new merchant -> D.inbox. */
+function normM(s){return String(s||'').toLowerCase().replace(/ё/g,'е').replace(/[^a-zа-яўқғҳ]+/g,'')}
+function parseAmt(v){
+  if(typeof v==='number')return Math.round(Math.abs(v));
+  var s=String(v==null?'':v).replace(/[^\d.,]/g,'');
+  s=s.replace(/[.,]\d{1,2}$/,'');
+  return +s.replace(/\D/g,'')||0;
+}
+function merCat(mer){var id=D.mcat[normM(mer)],c=id&&C.cat[id];return c&&!c.archived&&c.type==='exp'?id:null}
+function apBase(){return String(D.ap.url||'').trim().replace(/\/+$/,'')}
+var apBusy=false,apT=0;
+function apSync(force){
+  if(!D||!apBase()||!D.ap.key||apBusy||!navigator.onLine)return Promise.resolve();
+  if(!force&&Date.now()-apT<30000)return Promise.resolve();
+  apBusy=true;apT=Date.now();var base=apBase(),key=D.ap.key;
+  return fetch(base+'/list',{headers:{'X-Key':key},cache:'no-store'}).then(function(r){
+    if(r.status===401)throw new Error('Неверный ключ');if(!r.ok)throw new Error('Ошибка сервера '+r.status);return r.json();
+  }).then(function(j){
+    var items=(j&&j.items||[]).sort(function(a,b){return a.t-b.t}),seen={},ids=[],added=0,wait=0;
+    D.apSeen.forEach(function(id){seen[id]=1});
+    items.forEach(function(it){
+      if(!it||!it.id)return;ids.push(it.id);if(seen[it.id])return;seen[it.id]=1;D.apSeen.push(it.id);
+      var amt=parseAmt(it.amount),mer=String(it.merchant||'').trim().slice(0,80),t=+it.t||Date.now(),date=localDay(t);if(!(amt>0))return;
+      var c=merCat(mer);
+      if(mer&&c){D.tx.push({id:'ap'+it.id,type:'exp',date:date,amount:amt,cat:c,note:mer,memo:'',t:t,mer:mer});added++}
+      else{D.inbox.push({id:it.id,amount:amt,mer:mer,date:date,t:t});wait++}
+    });
+    if(D.apSeen.length>500)D.apSeen=D.apSeen.slice(-500);
+    D.ap.last=Date.now();D.ap.err=null;rebuild();flush();
+    if(added||wait)toast('Apple Pay: '+(added?'добавлено '+added:'')+(added&&wait?', ':'')+(wait?'ждут категорию '+wait:''));
+    if(!UI.editor)render();
+    if(ids.length)return fetch(base+'/ack',{method:'POST',headers:{'X-Key':key,'Content-Type':'application/json'},body:JSON.stringify({ids:ids})}).catch(function(){});
+  }).catch(function(e){D.ap.err=(e&&e.message&&/ключ|сервер/.test(e.message))?e.message:'Нет связи с сервером';if(force&&!UI.editor)render()})
+  .then(function(){apBusy=false});
+}
 
 /* ================= limit engine ================= */
 function mStart(y,m,sd){return ds(y,m,Math.min(sd,dim(y,m)))}
@@ -154,7 +195,7 @@ function sb(txt,c){return '<b class="'+(c||'')+(String(txt).length>9?' long':'')
 function kv(label,value,c,extra){return '<div class="kv'+(extra?' '+extra:'')+'"><span>'+label+'</span><b class="'+(c||'')+'">'+value+'</b></div>'}
 function tabbar(){
   function b(t,icon,label){return '<button data-act="tab" data-val="'+t+'" class="'+(UI.tab===t?'on':'')+'">'+icon+label+'</button>'}
-  return '<nav class="tabbar">'+b('ops',I.ops,'Операции')+b('stats',I.stats,'График')+b('limit',I.limit,'Лимит')+b('settings',I.set,'Настройки'+(UI.upd?'<i class="dot"></i>':''))+'</nav>';
+  return '<nav class="tabbar">'+b('ops',I.ops,'Операции'+(D&&D.inbox&&D.inbox.length?'<i class="dot"></i>':''))+b('stats',I.stats,'График')+b('limit',I.limit,'Лимит')+b('settings',I.set,'Настройки'+(UI.upd?'<i class="dot"></i>':''))+'</nav>';
 }
 function txRow(t,opts){
   var title=t.note||catLabel(t.cat),sub=t.note?catLabel(t.cat):(t.memo||'');
@@ -186,6 +227,7 @@ function viewOps(){
   if(UI.search!==null)return viewSearch();
   var h='<div class="topbar"><h1>Операции</h1><button class="icon solid" data-act="search" aria-label="Поиск">'+I.search+'</button></div>';
   h+='<div class="seg">'+seg('ov','days','По дням',UI.ov)+seg('ov','cal','Календарь',UI.ov)+seg('ov','months','По месяцам',UI.ov)+'</div>';
+  if(D.inbox.length)h+=viewInbox();
   if(UI.ov==='months')return wrap(h+viewMonths());
   var r=mRange(UI.month),list=txIn(r.from,r.to),inc=0,exp=0;
   list.forEach(function(t){if(t.type==='inc')inc+=t.amount;else exp+=t.amount});
@@ -196,6 +238,11 @@ function viewOps(){
   if(!dates.length)h+='<div class="empty">В этом месяце операций нет</div>';
   dates.forEach(function(d){h+=dayGroup(d,C.byDate[d])});
   return wrap(h);
+}
+function viewInbox(){
+  var l=D.inbox.slice().sort(function(a,b){return b.t-a.t});
+  return '<div class="card inbox"><div class="label">Apple Pay · ждут категорию: '+l.length+'</div>'+l.map(function(x){
+    return '<div class="tx" data-act="inbox-open" data-id="'+esc(x.id)+'"><div class="cic">?</div><div class="tmid"><b>'+esc(x.mer||'Без названия')+'</b><span>'+shortDate(x.date)+', '+hm(x.t)+'</span></div><div class="tamt">'+fmt(x.amount)+'</div></div>'}).join('')+'</div>';
 }
 function viewCal(r){
   var t=today(),first=r.from,last=r.to,off=wdi(first),n=diff(first,last)+1,cells='';
@@ -233,7 +280,9 @@ function viewSearch(){
 /* ================= editor ================= */
 function openEditor(opts){
   var t=opts.id?D.tx.filter(function(x){return x.id===opts.id})[0]:null;
-  if(t)UI.editor={id:t.id,type:t.type,date:t.date,expr:String(t.amount),cat:t.cat,note:t.note||'',memo:t.memo||'',panel:null,catParent:null,del:false,t:t.t};
+  var ib=opts.inbox?D.inbox.filter(function(x){return x.id===opts.inbox})[0]:null;
+  if(t)UI.editor={id:t.id,type:t.type,date:t.date,expr:String(t.amount),cat:t.cat,note:t.note||'',memo:t.memo||'',panel:null,catParent:null,del:false,t:t.t,mer:t.mer};
+  else if(ib)UI.editor={id:null,inbox:ib.id,mer:ib.mer,type:'exp',date:ib.date,expr:String(ib.amount),cat:merCat(ib.mer),note:ib.mer||'',memo:'',panel:'cat',catParent:null,del:false,t:ib.t};
   else UI.editor={id:null,type:opts.type||'exp',date:opts.date||today(),expr:'',cat:null,note:'',memo:'',panel:'calc',catParent:null,del:false};
 }
 function calcEval(expr){
@@ -251,7 +300,7 @@ function viewEditor(){
   var catTxt=E.cat&&C.cat[E.cat]?catLabel(E.cat):null;
   var h='<div class="ed" id="ed"><div class="edin"><div class="edhead"><button class="icon" data-act="ed-close" aria-label="Закрыть">'+I.x+'</button>'+
     '<div class="seg">'+seg('ed-type','exp','Расход',E.type)+seg('ed-type','inc','Доход',E.type)+'</div>'+
-    (E.id?'<button class="icon" data-act="ed-del" aria-label="Удалить">'+I.trash+'</button>':'<span style="width:40px"></span>')+'</div>';
+    (E.id||E.inbox?'<button class="icon" data-act="ed-del" aria-label="Удалить">'+I.trash+'</button>':'<span style="width:40px"></span>')+'</div>';
   h+='<div class="edbody">';
   h+='<button class="amt'+(E.panel==='calc'?' on':'')+'" data-act="ed-panel" data-val="calc"><span class="expr">'+(hasOp?esc(exprView(E.expr)):'')+'</span>'+
     (E.expr?'<b>'+(hasOp?'= ':'')+fmt(val)+'</b>':'<b class="ph">0</b>')+'<em>сум</em></button>';
@@ -259,8 +308,9 @@ function viewEditor(){
     '<label class="frow"><span>Дата</span><input type="date" data-e="date" value="'+E.date+'"></label>'+
     '<label class="frow"><span>Заметка</span><input data-e="note" value="'+esc(E.note)+'" placeholder="Например, Суши" autocomplete="off" enterkeyhint="done"></label>'+
     '<label class="frow"><span>Описание</span><input data-e="memo" value="'+esc(E.memo)+'" placeholder="Необязательно" autocomplete="off" enterkeyhint="done"></label></div>';
+  if(E.inbox)h+='<p class="small" style="margin:10px 4px 0">Оплата Apple Pay'+(E.mer?' в «'+esc(E.mer)+'»':'')+'. Выбранная категория запомнится — следующие оплаты здесь запишутся в неё сами.</p>';
   if(E.del)h+='<div class="confirm"><b>Удалить операцию?</b><div class="btnrow mt"><button class="btn ghost" data-act="ed-del-no">Отмена</button><button class="btn" data-act="ed-del-yes" style="background:var(--neg);color:#fff">Удалить</button></div></div>';
-  h+='<div class="edbtns">'+(E.id?'':'<button class="btn ghost" data-act="ed-save" data-val="more">Продолжить</button>')+'<button class="btn" data-act="ed-save">Сохранить</button></div>';
+  h+='<div class="edbtns">'+(E.id||E.inbox?'':'<button class="btn ghost" data-act="ed-save" data-val="more">Продолжить</button>')+'<button class="btn" data-act="ed-save">Сохранить</button></div>';
   h+='</div>';
   if(E.panel==='calc'){
     var k=function(v,c,l){return '<button class="'+(c||'')+'" data-act="key" data-val="'+v+'">'+(l||v)+'</button>'};
@@ -281,8 +331,10 @@ function edSave(more){
   if(!(a>0)){E.panel='calc';toast('Введи сумму');return false}
   if(!E.cat||!C.cat[E.cat]||C.cat[E.cat].type!==E.type){E.panel='cat';E.catParent=null;toast('Выбери категорию');return false}
   if(!isDate(E.date)){toast('Проверь дату');return false}
-  var rec={id:E.id||newId(),type:E.type,date:E.date,amount:a,cat:E.cat,note:E.note.trim(),memo:E.memo.trim(),t:E.t||Date.now()};
-  if(!E.id&&E.date!==today()){rec.t=U(E.date)+12*36e5}
+  var rec={id:E.id||(E.inbox?'ap'+E.inbox:newId()),type:E.type,date:E.date,amount:a,cat:E.cat,note:E.note.trim(),memo:E.memo.trim(),t:E.t||Date.now()};
+  if(!E.id&&!E.inbox&&E.date!==today()){rec.t=U(E.date)+12*36e5}
+  if(E.mer){rec.mer=E.mer;if(E.type==='exp'&&normM(E.mer))D.mcat[normM(E.mer)]=E.cat}
+  if(E.inbox){var ibid=E.inbox;D.inbox=D.inbox.filter(function(x){return x.id!==ibid})}
   if(E.id){D.tx=D.tx.map(function(x){return x.id===E.id?rec:x})}else D.tx.push(rec);
   rebuild();persist();
   if(more){UI.editor={id:null,type:E.type,date:E.date,expr:'',cat:null,note:'',memo:'',panel:'calc',catParent:null,del:false};toast('Сохранено, вводи следующую')}
@@ -568,6 +620,14 @@ function viewSettings(){
       (st.mode==='month'?'<div class="row"><span>Месяц начинается с числа</span><div class="carry"><input class="in xs" data-k="set-day" inputmode="numeric" value="'+esc(draft('set-day',String(st.startDay||12)))+'"><button class="btn sm ghost" data-act="save-day">OK</button></div></div>':'')+
       '<div class="row"><span>Перенос до первого периода</span><div class="carry"><div class="seg mini">'+seg('dseg','+','+',sign,' data-key="set-sign"')+seg('dseg','-','−',sign,' data-key="set-sign"')+'</div><input class="in" style="width:100px" data-k="set-carry" data-money inputmode="numeric" value="'+money('set-carry',Math.abs(+st.initialCarry||0))+'"><button class="btn sm ghost" data-act="save-carry">OK</button></div></div></div>';
   }
+  var ap=D.ap,st2=!apBase()?'Не подключено':ap.err?'<span class="neg">'+esc(ap.err)+'</span>':ap.last?'<span class="pos">Подключено</span> · проверено '+(localDay(ap.last)===today()?'сегодня':shortDate(localDay(ap.last)))+' в '+hm(ap.last):'Ещё не проверено';
+  h+='<div class="card"><h3>Apple Pay</h3><p class="small">Оплаты телефоном сами попадают в расходы: команда iPhone отправляет их на твой сервер Cloudflare, приложение забирает при открытии. Знакомый магазин записывается в свою последнюю категорию, новый — ждёт выбора на вкладке «Операции».</p>'+
+    '<p class="small">Статус: '+st2+'</p>'+
+    '<div class="label mt">Адрес сервера</div><input class="in wide mt" data-k="ap-url" value="'+esc(draft('ap-url',ap.url||''))+'" placeholder="https://budget-pay.имя.workers.dev" autocomplete="off" autocapitalize="off" spellcheck="false">'+
+    '<div class="btnrow mt"><button class="btn sm" data-act="ap-save">Сохранить</button>'+(apBase()?'<button class="btn sm ghost" data-act="ap-sync">Проверить</button>':'')+'</div>'+
+    '<div class="label mt2">Ключ доступа</div><div class="row" style="border:0"><code class="key">'+esc(ap.key)+'</code></div>'+
+    '<div class="btnrow"><button class="btn sm ghost" data-act="ap-copy">Скопировать</button><button class="btn sm ghost'+(UI.apKeyArm?' danger':'')+'" data-act="ap-newkey">'+(UI.apKeyArm?'Точно заменить?':'Новый ключ')+'</button></div>'+
+    '<p class="small">Ключ нужен в двух местах: в настройках сервера (секрет KEY) и в команде (заголовок X-Key). Никому его не показывай.</p></div>';
   var ex=tops('exp'),inL=ex.filter(function(c){return !c.nl}).length;
   h+='<div class="card"><h3>Категории</h3><p class="small">Расходов: '+ex.length+', доходов: '+tops('inc').length+'. В дневном лимите учитываются '+inL+' из '+ex.length+' категорий расходов.</p><button class="btn ghost block mt" data-act="open-cats">Категории и лимит →</button></div>';
   h+='<div class="card"><h3>Импорт из «Умного счёта»</h3><p class="small">Выбери свежий файл резервной копии (.mmbak). Операции и категории заменятся данными из файла, настройки лимита останутся.'+(D.importedAt?' Последний импорт: '+shortDate(D.importedAt)+'.':'')+'</p><label class="btn ghost block mt filebtn">Выбрать файл .mmbak<input type="file" data-file="mm" hidden></label>'+(UI.pendingKind==='mm'?pendingBox():'')+'</div>';
@@ -730,7 +790,7 @@ async function doUpdate(){
   }catch(e){}
   await wait(300);location.reload();
 }
-function tick(){checkUpdate();if(UI.lastDay&&today()!==UI.lastDay){if(D&&reconcile()){}if(!UI.editor)render()}}
+function tick(){checkUpdate();apSync();if(UI.lastDay&&today()!==UI.lastDay){if(D&&reconcile()){}if(!UI.editor)render()}}
 
 /* ================= actions ================= */
 var A={
@@ -744,6 +804,15 @@ var A={
   'search-close':function(){UI.search=null},
   add:function(el){var d=el.dataset.date||(UI.tab==='ops'&&UI.ov==='cal'&&UI.calSel?UI.calSel:today());openEditor({date:d});UI.sheet=null;return 'ov'},
   'edit-tx':function(el){openEditor({id:el.dataset.id});return 'ov'},
+  'inbox-open':function(el){openEditor({inbox:el.dataset.id});return 'ov'},
+  'ap-save':function(){var u=String(draft('ap-url',D.ap.url||'')).trim();if(u&&!/^https:\/\/[^\s/]+/.test(u)){toast('Адрес должен начинаться с https://');return}D.ap.url=u;D.ap.err=null;D.ap.last=null;delete UI.d['ap-url'];persist();if(u){toast('Проверяю…');apSync(true)}else toast('Отключено')},
+  'ap-sync':function(){toast('Проверяю…');apSync(true)},
+  'ap-copy':function(){var k=D.ap.key;try{navigator.clipboard.writeText(k).then(function(){toast('Ключ скопирован')},function(){toast(k)})}catch(e){toast(k)}},
+  'ap-newkey':function(){if(!UI.apKeyArm){UI.apKeyArm=true;setTimeout(function(){UI.apKeyArm=false;render()},5000);return}UI.apKeyArm=false;
+    var nk=randKey();if(!apBase()){D.ap.key=nk;persist();toast('Новый ключ создан');return}
+    fetch(apBase()+'/rekey',{method:'POST',headers:{'X-Key':D.ap.key,'Content-Type':'application/json'},body:JSON.stringify({key:nk})}).then(function(r){
+      if(!r.ok)throw 0;D.ap.key=nk;D.ap.err=null;flush();render();toast('Ключ заменён — обнови его в команде iPhone');
+    }).catch(function(){toast('Не удалось сменить ключ: нет связи с сервером')})},
   'ed-close':function(){UI.editor=null},
   'ed-type':function(el){var E=UI.editor;if(E.type!==el.dataset.val){E.type=el.dataset.val;if(E.cat&&C.cat[E.cat]&&C.cat[E.cat].type!==E.type)E.cat=null;E.catParent=null;if(E.panel==='cat')E.panel='cat'}return 'ov'},
   'ed-panel':function(el){var E=UI.editor,p=el.dataset.val;E.panel=E.panel===p?null:p;if(p==='cat')E.catParent=null;return 'ov'},
@@ -765,7 +834,7 @@ var A={
   'ed-save':function(el){var ok=edSave(el.dataset.val==='more');return ok&&el.dataset.val!=='more'?undefined:(ok?undefined:'ov')},
   'ed-del':function(){UI.editor.del=true;return 'ov'},
   'ed-del-no':function(){UI.editor.del=false;return 'ov'},
-  'ed-del-yes':function(){var id=UI.editor.id;D.tx=D.tx.filter(function(t){return t.id!==id});UI.editor=null;rebuild();persist();toast('Удалено')},
+  'ed-del-yes':function(){var id=UI.editor.id,ib=UI.editor.inbox;if(ib){D.inbox=D.inbox.filter(function(x){return x.id!==ib});UI.editor=null;persist();toast('Удалено');return}D.tx=D.tx.filter(function(t){return t.id!==id});UI.editor=null;rebuild();persist();toast('Удалено')},
   zero:function(el){var d=el.dataset.date;if(!entered(d)){D.zero[d]=1;rebuild();persist()}},
   lv:function(el){UI.lv=el.dataset.val},
   hist:function(el){UI.hist=Math.max(0,(UI.hist||0)+(+el.dataset.val))},
@@ -870,7 +939,7 @@ async function init(){
   rebuild();reconcile();UI.loaded=true;render();
   try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
   if('serviceWorker' in navigator&&location.protocol!=='file:')navigator.serviceWorker.register('sw.js').catch(function(){});
-  setInterval(tick,30000);checkUpdate();
+  setInterval(tick,30000);checkUpdate();apSync(true);
 }
 window.__budget={get D(){return D},UI:UI,render:render};
 init();
