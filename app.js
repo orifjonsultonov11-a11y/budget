@@ -1,7 +1,7 @@
 /* Мой бюджет — учёт доходов/расходов + дневной лимит. Данные хранятся только на этом устройстве. */
 (function(){
 'use strict';
-var APP_VERSION=7; /* = version in version.json and CACHE in sw.js */
+var APP_VERSION=8; /* = version in version.json and CACHE in sw.js */
 var app=document.getElementById('app'),ov=document.getElementById('ov'),tipEl=document.getElementById('tip'),toastEl=document.getElementById('toast');
 
 /* ================= utils ================= */
@@ -297,6 +297,7 @@ var I={
   lock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg>',
   face:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M9 9v1.5M15 9v1.5M12 9v4h-1M9.5 16a3.5 3.5 0 0 0 5 0"/></svg>',
   del:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6-7z"/><path d="M12 9.5l5 5M17 9.5l-5 5"/></svg>',
+  down:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l7 7 7-7"/></svg>',
   back:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 6l-6 6 6 6"/></svg>'
 };
 
@@ -737,7 +738,36 @@ function viewAp(){
     '<div class="label mt2">Ключ доступа</div><div class="row" style="border:0"><code class="key">'+esc(ap.key)+'</code></div>'+
     '<div class="btnrow"><button class="btn sm ghost" data-act="ap-copy">Скопировать</button><button class="btn sm ghost'+(UI.apKeyArm?' danger':'')+'" data-act="ap-newkey">'+(UI.apKeyArm?'Точно заменить?':'Новый ключ')+'</button></div>'+
     '<p class="small">Ключ вставляется в команду iPhone (заголовок X-Key). Никому его не показывай.</p></div>';
+  h+=apGuide();
   return wrap(h);
+}
+function apGuide(){
+  var open=UI.apHelp!=null?UI.apHelp:!apBase()||!D.ap.last,url=apBase(),add=url?url+'/add':'адрес сервера + /add';
+  var h='<div class="card guide"><button class="navrow gtoggle" data-act="ap-help"><span><b>Как подключить</b><span class="small">Сервер Cloudflare и команда iPhone (iOS 26) · ~15 минут</span></span>'+(open?I.down:I.r)+'</button>';
+  if(!open)return h+'</div>';
+  function st(t,body){return '<li><b>'+t+'</b>'+(body?'<div>'+body+'</div>':'')+'</li>'}
+  h+='<p class="small">Нужно один раз. Сервер бесплатный: он принимает оплаты от iPhone и хранит их, пока приложение их не заберёт.</p>';
+  h+='<div class="label mt2">Шаг 1. Сервер Cloudflare</div><ol class="steps">'+
+    st('Зарегистрируйся','<a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">dash.cloudflare.com</a> — бесплатный тариф, нужна только почта. Удобнее делать с компьютера, но в Safari тоже работает.')+
+    st('Создай хранилище','Слева «Storage &amp; Databases» → «Workers KV» → «Create». Имя: <code>budget-queue</code>.')+
+    st('Создай сервер','«Workers &amp; Pages» → «Create» → «Start with Hello World» → имя, например <code>budget-pay</code> → «Deploy».')+
+    st('Вставь код сервера','<button class="btn sm ghost mt" data-act="ap-code">Скопировать код сервера</button><div class="mt">Затем «Edit code» → удали всё, что там есть → вставь → «Deploy».</div>')+
+    st('Подключи хранилище к серверу','Открой сервер → «Settings» → «Bindings» → «Add» → «KV namespace». Variable name: <code>QUEUE</code>, namespace: <code>budget-queue</code> → «Add binding» / «Deploy».')+
+    st('Скопируй адрес сервера','Он на странице сервера, вида <code>https://budget-pay.имя.workers.dev</code>.')+
+    st('Вставь адрес выше и нажми «Сохранить»','Сделай это сразу: сервер запоминает ключ первого подключившегося приложения и дальше принимает только его. Статус станет «Подключено».')+
+    '</ol>';
+  h+='<div class="label mt2">Шаг 2. Команда на iPhone (iOS 26)</div><ol class="steps">'+
+    st('Открой «Команды» → «Автоматизация» → «+»','Выбери «Транзакция».')+
+    st('Настрой триггер','«Когда я касаюсь» — отметь свою карту. «Категории» и «Продавец» оставь «Любой». Включи «Запускать сразу», «Уведомлять при запуске» — выключи. → «Далее» → «Новая пустая автоматизация».')+
+    st('Добавь действие «Получить содержимое URL»','«Добавить действие» → в поиске «URL». Нажми на синее «URL» и вставь:<div class="copyrow"><code>'+esc(add)+'</code>'+(url?'<button class="btn sm ghost" data-act="ap-copyurl">Скопировать</button>':'')+'</div>')+
+    st('Раскрой параметры стрелкой «›»','«Метод» → <b>POST</b>.')+
+    st('Заголовки','«Добавить новый заголовок»: ключ <code>X-Key</code>, текст — ключ доступа выше (кнопка «Скопировать»).')+
+    st('Тело запроса → JSON','«Добавить новое поле» → «Текст»: ключ <code>amount</code>, значение — переменная «Ввод команды» → свойство «Сумма».<br>Ещё одно поле «Текст»: ключ <code>merchant</code>, значение — «Ввод команды» → «Продавец».')+
+    st('«Готово»','Проверь: <code>amount</code>, <code>merchant</code>, <code>X-Key</code> — латиницей; в полях цветные плашки-переменные, а не обычный текст.')+
+    '</ol>';
+  h+='<div class="label mt2">Шаг 3. Проверка</div><p class="small">Оплати что-нибудь телефоном и открой приложение: платёж появится вверху вкладки «Операции». Выбери категорию — следующие оплаты в этом магазине запишутся сами.</p>'+
+    '<p class="small">Не пришло? «Команды» → «Автоматизация» → твоя автоматизация: там видно, запускалась ли она. Статус «Нет связи с сервером» — проверь интернет или VPN: некоторые сети блокируют адреса workers.dev.</p>';
+  return h+'</div>';
 }
 function viewPinSet(){
   var h=subTop('Пароль');
@@ -961,6 +991,16 @@ var A={
   'inbox-open':function(el){openEditor({inbox:el.dataset.id});return 'ov'},
   'ap-save':function(){var u=String(draft('ap-url',D.ap.url||'')).trim();if(u&&!/^https:\/\/[^\s/]+/.test(u)){toast('Адрес должен начинаться с https://');return}D.ap.url=u;D.ap.err=null;D.ap.last=null;delete UI.d['ap-url'];persist();if(u){toast('Проверяю…');apSync(true)}else toast('Отключено')},
   'ap-sync':function(){toast('Проверяю…');apSync(true)},
+  'ap-help':function(){UI.apHelp=!(UI.apHelp!=null?UI.apHelp:!apBase()||!D.ap.last)},
+  'ap-copyurl':function(){var u=apBase()+'/add';try{navigator.clipboard.writeText(u).then(function(){toast('Адрес скопирован')},function(){toast(u)})}catch(e){toast(u)}},
+  'ap-code':function(){
+    var src=new URL('worker/worker.js',location.href).href,p=fetch(src,{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.text()});
+    function fail(){toast('Не скопировалось — открываю код');setTimeout(function(){window.open('https://github.com/orifjonsultonov11-a11y/budget/blob/main/worker/worker.js','_blank')},800)}
+    try{
+      if(window.ClipboardItem&&navigator.clipboard.write){navigator.clipboard.write([new ClipboardItem({'text/plain':p.then(function(t){return new Blob([t],{type:'text/plain'})})})]).then(function(){toast('Код сервера скопирован')},fail);return}
+      p.then(function(t){return navigator.clipboard.writeText(t)}).then(function(){toast('Код сервера скопирован')},fail);
+    }catch(e){fail()}
+  },
   'ap-copy':function(){var k=D.ap.key;try{navigator.clipboard.writeText(k).then(function(){toast('Ключ скопирован')},function(){toast(k)})}catch(e){toast(k)}},
   'ap-newkey':function(){if(!UI.apKeyArm){UI.apKeyArm=true;setTimeout(function(){UI.apKeyArm=false;render()},5000);return}UI.apKeyArm=false;
     var nk=randKey();if(!apBase()){D.ap.key=nk;persist();toast('Новый ключ создан');return}
