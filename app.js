@@ -1,7 +1,7 @@
 /* Мой бюджет — учёт доходов/расходов + дневной лимит. Данные хранятся только на этом устройстве. */
 (function(){
 'use strict';
-var APP_VERSION=9; /* = version in version.json and CACHE in sw.js */
+var APP_VERSION=10; /* = version in version.json and CACHE in sw.js */
 var app=document.getElementById('app'),ov=document.getElementById('ov'),tipEl=document.getElementById('tip'),toastEl=document.getElementById('toast');
 
 /* ================= utils ================= */
@@ -823,6 +823,7 @@ function viewLim(){var h=subTop('Лимит');
 function viewSettings(){
   if(UI.setView==='cats')return viewCats();
   if(UI.setView==='lim')return viewLim();
+  if(UI.setView==='stats')return viewStatsAdmin();
   if(UI.setView==='imp')return viewImp();
   if(UI.setView==='bak')return viewBak();
   if(UI.setView==='ap')return viewAp();
@@ -843,7 +844,7 @@ function viewSettings(){
   h+=navRow('open-imp','Импорт из «Умного счёта»',D.importedAt?'Последний импорт: '+shortDate(D.importedAt):'Перенести операции из файла .mmbak');
   h+=navRow('open-bak','Резервная копия',D.lastBackup?'Последняя копия: '+shortDate(D.lastBackup):'<span class="neg">Копию ещё не сохраняли</span>');
   h+='<button class="btn ghost block danger" data-act="reset">'+(UI.resetArm?'Точно удалить всё? Нажми ещё раз':'Удалить все данные')+'</button>';
-  h+='<p class="small" style="text-align:center;margin-top:16px">Версия '+APP_VERSION+'</p>';
+  h+='<p class="small vline" data-act="ver-tap">Версия '+APP_VERSION+'</p><p class="small vline" style="margin-top:2px">Приложение анонимно считает число установок — без ваших данных.</p>';
   return wrap(h);
 }
 function viewCats(){
@@ -1001,7 +1002,39 @@ async function doUpdate(){
   }catch(e){}
   await wait(300);location.reload();
 }
-function tick(){checkUpdate();apSync();if(UI.lastDay&&today()!==UI.lastDay){if(D&&reconcile()){}if(!UI.editor)render()}}
+/* anonymous install counter (worker/stats.js): once a day — random install id + app version, nothing else */
+var STATS_URL='https://budget-stats.ob-0849d5d2.workers.dev';
+function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function lsSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+function statsPing(){
+  if(!navigator.onLine||location.protocol==='file:'||(/^(localhost|127\.0\.0\.1)$/.test(location.hostname)&&!window.__statsTest))return;
+  var id=lsGet('budget-iid');if(!id){id=randKey();lsSet('budget-iid',id)}
+  var mark=today()+'|'+APP_VERSION;if(lsGet('budget-ping')===mark)return;
+  fetch(STATS_URL+'/ping',{method:'POST',body:JSON.stringify({id:id,v:APP_VERSION}),keepalive:true}).then(function(r){if(r.ok)lsSet('budget-ping',mark)}).catch(function(){});
+}
+/* the screen opens only for the owner: other devices get no reaction (401 → silence) */
+function statsLoad(open){
+  var k=lsGet('budget-admin');if(!k){k=randKey()+randKey();lsSet('budget-admin',k)}
+  if(UI.statsBusy)return;UI.statsBusy=true;if(!open){UI.stats={busy:true};render()}
+  fetch(STATS_URL+'/stats',{headers:{'X-Key':k},cache:'no-store'}).then(function(r){if(r.status===401)throw new Error('key');if(!r.ok)throw new Error('http');return r.json()})
+    .then(function(j){UI.stats={data:j};if(open){UI.setView='stats';window.scrollTo(0,0)}})
+    .catch(function(e){if(open||(e&&e.message==='key')){if(UI.setView==='stats')UI.setView=null;return}UI.stats={err:'Нет связи с сервером статистики.'}})
+    .then(function(){UI.statsBusy=false;if(UI.tab==='settings'&&!UI.editor)render()});
+}
+function viewStatsAdmin(){
+  var h=subTop('Статистика'),st=UI.stats||{};
+  if(st.busy)return wrap(h+'<div class="loading"><div class="spin"></div></div>');
+  if(st.err)return wrap(h+'<div class="card"><p class="small" style="margin-top:0">'+esc(st.err)+'</p><button class="btn ghost block mt" data-act="stats-reload">Повторить</button></div>');
+  var d=st.data;if(!d)return wrap(h);
+  var vs=Object.keys(d.versions||{}).sort(function(a,b){return b-a});
+  h+='<div class="card"><div class="limhead" style="margin-top:0"><b>'+d.total+'</b> '+plural(d.total,'установка','установки','установок')+' всего</div>'+
+    kv('Пользовались сегодня',String(d.active1))+kv('За 7 дней',String(d.active7))+kv('За 30 дней',String(d.active30))+kv('Новых за 7 дней',String(d.new7))+'</div>';
+  if(vs.length)h+='<div class="card"><h3>Версии</h3><p class="small">У кого какая версия — среди пользовавшихся за 30 дней.</p><div class="mt">'+vs.map(function(v){return kv('Версия '+v+(+v===APP_VERSION?' (текущая)':''),String(d.versions[v]))}).join('')+'</div></div>';
+  h+='<p class="small" style="margin:0 4px">Считаются установки, которые открывались с интернетом; ваша тоже в счёте. Номер установки случайный, данных пользователей сервер не получает.</p>'+
+    '<button class="btn ghost block mt2" data-act="stats-reload">Обновить</button>';
+  return wrap(h);
+}
+function tick(){checkUpdate();apSync();statsPing();if(UI.lastDay&&today()!==UI.lastDay){if(D&&reconcile()){}if(!UI.editor)render()}}
 
 /* ================= actions ================= */
 var A={
@@ -1099,6 +1132,8 @@ var A={
   'set-back':function(){UI.setView=null;window.scrollTo(0,0)},
   'open-ap':function(){UI.setView='ap';window.scrollTo(0,0)},
   'open-pin':function(){UI.setView='pin';window.scrollTo(0,0)},
+  'ver-tap':function(){var n=Date.now();UI.vt=(UI.vt||[]).filter(function(t){return n-t<3000});UI.vt.push(n);if(UI.vt.length>=5){UI.vt=[];statsLoad(true)}return 'ov'},
+  'stats-reload':function(){statsLoad(false)},
   'open-lim':function(){UI.setView='lim';window.scrollTo(0,0)},
   'open-imp':function(){UI.setView='imp';window.scrollTo(0,0)},
   'open-bak':function(){UI.setView='bak';window.scrollTo(0,0)},
@@ -1200,7 +1235,7 @@ async function init(){
   if(SEC.pin&&SEC.fid)setTimeout(function(){fidUnlock(true)},350);
   try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
   if('serviceWorker' in navigator&&location.protocol!=='file:')navigator.serviceWorker.register('sw.js').catch(function(){});
-  setInterval(tick,30000);checkUpdate();apSync(true);
+  setInterval(tick,30000);checkUpdate();apSync(true);statsPing();
 }
 window.__budget={get D(){return D},UI:UI,render:render};
 init();
