@@ -75,7 +75,7 @@ export default {
       const list = await env.QUEUE.list({ prefix: 'tx:' });
       const items = (await Promise.all(list.keys.map(k => env.QUEUE.get(k.name, 'json')))).filter(Boolean);
       const fresh = items.filter(it => it.t > (sum.t || 0));
-      sum.pend = { n: fresh.length, sum: fresh.reduce((a, it) => a + amt(it.amount), 0) };
+      sum.pend = { n: fresh.length, sum: fresh.reduce((a, it) => a + amt(it.amount), 0), items: fresh.map(it => ({ t: it.t, a: amt(it.amount) })) };
       return json(sum);
     }
     if (url.pathname === '/list' && req.method === 'GET') {
