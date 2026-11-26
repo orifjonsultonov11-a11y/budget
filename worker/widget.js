@@ -82,14 +82,36 @@ function ringImage(p, size, w, mono) {
   }
   return ctx.getImage();
 }
+// сегмент кольца («долька») со скруглёнными углами: дуги + квадратичные кривые в углах
+function sector(ctx, c, r, w, f0, f1, rc, color) {
+  const ro = r + w / 2, ri = r - w / 2, span = (f1 - f0) * 2 * Math.PI;
+  rc = Math.max(0.5, Math.min(rc, w / 2 - 0.5, span * ri / 2 - 0.2));
+  const P = (rad, f) => pt(c, rad, f), dO = rc / ro / (2 * Math.PI), dI = rc / ri / (2 * Math.PI);
+  const path = new Path(), n = (a, b) => Math.max(2, Math.ceil((b - a) * 240));
+  path.move(P(ro, f0 + dO));
+  for (let i = 1, k = n(f0 + dO, f1 - dO); i <= k; i++) path.addLine(P(ro, f0 + dO + (f1 - dO - f0 - dO) * i / k));
+  path.addQuadCurve(P(ro - rc, f1), P(ro, f1));
+  path.addLine(P(ri + rc, f1));
+  path.addQuadCurve(P(ri, f1 - dI), P(ri, f1));
+  for (let i = 1, k = n(f0 + dI, f1 - dI); i <= k; i++) path.addLine(P(ri, f1 - dI - (f1 - dI - f0 - dI) * i / k));
+  path.addQuadCurve(P(ri + rc, f0), P(ri, f0));
+  path.addLine(P(ro - rc, f0));
+  path.addQuadCurve(P(ro, f0 + dO), P(ro, f0));
+  path.closeSubpath();
+  ctx.addPath(path);
+  ctx.setFillColor(color);
+  ctx.fillPath();
+}
 function donutImage(cats, size, w) {
-  const ctx = canvas(size), c = size / 2, r = (size - w) / 2, gap = cats.length > 1 ? 0.006 : 0;
-  let f = 0;
+  const ctx = canvas(size), c = size / 2, r = (size - w) / 2, L = 2 * Math.PI * r;
   const sum = cats.reduce((a, x) => a + x.p, 0) || 1;
-  if (!cats.length) arc(ctx, c, r, 0, 1, new Color('#b5b4ad', 0.3), w, false);
+  if (!cats.length) { arc(ctx, c, r, 0, 1, new Color('#b5b4ad', 0.3), w, false); return ctx.getImage(); }
+  if (cats.length === 1) { arc(ctx, c, r, 0, 1, new Color(cats[0].c), w, false); return ctx.getImage(); }
+  const gap = 2.5 / L;
+  let f = 0;
   for (const x of cats) {
     const len = x.p / sum;
-    arc(ctx, c, r, f + gap, f + len - gap, new Color(x.c), w, false);
+    if (len > gap * 1.5) sector(ctx, c, r, w, f + gap / 2, f + len - gap / 2, 3.5, new Color(x.c));
     f += len;
   }
   return ctx.getImage();
