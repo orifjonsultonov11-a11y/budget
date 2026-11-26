@@ -6,6 +6,8 @@
 //   GET  /list  — приложение забирает платежи
 //   POST /ack   — приложение подтверждает {ids:[...]}, записи удаляются
 //   POST /rekey — замена ключа {key: новый} (с текущим ключом в X-Key)
+//   POST /summary — приложение кладёт короткую сводку для виджета (лимит, проценты категорий)
+//   GET  /summary — виджет забирает сводку; pend — оплаты из очереди, которых приложение ещё не видело
 // Каждый запрос — с заголовком X-Key: <ключ из настроек приложения>.
 // Неподтверждённые записи сами удаляются через 30 дней.
 
@@ -17,6 +19,12 @@ const CORS = {
 };
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { ...CORS, 'Content-Type': 'application/json; charset=utf-8' } });
+
+// «25 400,00 UZS» -> 25400 (копейки отбрасываются), как parseAmt() в приложении
+function amt(v) {
+  let s = String(v ?? '').replace(/[^\d.,]/g, '').replace(/[.,]\d{1,2}$/, '');
+  return +s.replace(/\D/g, '') || 0;
+}
 
 async function body(req) {
   const type = req.headers.get('Content-Type') || '';
@@ -53,6 +61,22 @@ export default {
       const item = { id, t, amount: String(b.amount ?? '').slice(0, 40), merchant: String(b.merchant ?? '').slice(0, 100) };
       await env.QUEUE.put('tx:' + id, JSON.stringify(item), { expirationTtl: 60 * 60 * 24 * 30 });
       return json({ ok: true, id });
+    }
+    if (url.pathname === '/summary' && req.method === 'POST') {
+      const text = await req.text();
+      if (text.length > 8000) return json({ error: 'too big' }, 413);
+      try { JSON.parse(text); } catch { return json({ error: 'json' }, 400); }
+      await env.QUEUE.put('cfg:sum', text);
+      return json({ ok: true });
+    }
+    if (url.pathname === '/summary' && req.method === 'GET') {
+      const sum = await env.QUEUE.get('cfg:sum', 'json');
+      if (!sum) return json({ error: 'no summary' }, 404);
+      const list = await env.QUEUE.list({ prefix: 'tx:' });
+      const items = (await Promise.all(list.keys.map(k => env.QUEUE.get(k.name, 'json')))).filter(Boolean);
+      const fresh = items.filter(it => it.t > (sum.t || 0));
+      sum.pend = { n: fresh.length, sum: fresh.reduce((a, it) => a + amt(it.amount), 0) };
+      return json(sum);
     }
     if (url.pathname === '/list' && req.method === 'GET') {
       const list = await env.QUEUE.list({ prefix: 'tx:' });

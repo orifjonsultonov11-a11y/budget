@@ -1,6 +1,6 @@
 // Офлайн-кэш: приложение открывается без интернета.
 // Новая версия ставится кнопкой «Обновить» в настройках (её показывает version.json).
-const CACHE = 'budget-v10';
+const CACHE = 'budget-v11';
 const FILES = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png', './sql-wasm.js', './sql-wasm.wasm'];
 
 self.addEventListener('install', e => {
