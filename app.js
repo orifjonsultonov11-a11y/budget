@@ -1,7 +1,7 @@
 /* Мой бюджет — учёт доходов/расходов + дневной лимит. Данные хранятся только на этом устройстве. */
 (function(){
 'use strict';
-var APP_VERSION=11; /* = version in version.json and CACHE in sw.js */
+var APP_VERSION=12; /* = version in version.json and CACHE in sw.js */
 var app=document.getElementById('app'),ov=document.getElementById('ov'),tipEl=document.getElementById('tip'),toastEl=document.getElementById('toast');
 
 /* ================= utils ================= */
@@ -305,16 +305,23 @@ function limitRowFor(date){if(!D.limit)return null;var all=compute();for(var i=0
 
 /* ================= widget (Scriptable, worker/widget.js): short summary to the user's own Apple Pay server ================= */
 function widgetSummary(){
-  var t=today(),per,lim=null,spent=null,td=null;
-  if(D.limit){var all=compute(),loc=locate(all,t),p=loc.cur||loc.ended||all[all.length-1],r=limitRowFor(t);per={s:p.start,e:p.end};lim=p.limit;
-    spent=p.rows.filter(function(x){return x.date<=t}).reduce(function(a,x){return a+(x.spent||0)},0);if(r)td={avail:r.carry+r.lim,spent:r.spent||0}}
-  else{var mr=mRange(mkOf(t));per={s:mr.from,e:mr.to}}
-  var to=per.e<t?per.e:t,m={},total=0;
-  D.tx.forEach(function(x){if(x.type!=='exp'||x.date<per.s||x.date>to)return;var k=topId(x.cat);m[k]=(m[k]||0)+x.amount;total+=x.amount});
-  var arr=Object.keys(m).map(function(k){return{id:k,s:m[k]}}).sort(function(a,b){return b.s-a.s}),top=arr.slice(0,5),rest=arr.slice(5).reduce(function(a,x){return a+x.s},0);
-  var cats=top.map(function(x){var c=C.cat[x.id],sl=C.slot[x.id];return{n:c?splitName(c.name).label:'Без категории',p:total?Math.round(x.s/total*100):0,c:sl!=null&&sl<8?PALHEX[sl]:'#b5b4ad'}});
-  if(rest)cats.push({n:'Другое',p:Math.round(rest/total*100),c:'#b5b4ad'});
-  return{v:1,per:per,lim:lim,spent:spent,today:td,total:total,cats:cats};
+  var t=today(),out={v:2,date:t,lim:null,exp:null};
+  function slotC(id){var sl=C.slot[id];return sl!=null&&sl<8?PALHEX[sl]:'#b5b4ad'}
+  function catsOf(from,to){var m={},total=0;D.tx.forEach(function(x){if(x.type!=='exp'||x.date<from||x.date>to)return;var k=topId(x.cat);m[k]=(m[k]||0)+x.amount;total+=x.amount});
+    var arr=Object.keys(m).map(function(k){return{id:k,s:m[k]}}).sort(function(a,b){return b.s-a.s}),top=arr.slice(0,5),rest=arr.slice(5).reduce(function(a,x){return a+x.s},0);
+    var cats=top.map(function(x){var c=C.cat[x.id];return{n:c?splitName(c.name).label:'Без категории',s:x.s,p:total?Math.round(x.s/total*100):0,c:slotC(x.id)}});
+    if(rest)cats.push({n:'Другое',s:rest,p:Math.round(rest/total*100),c:'#b5b4ad'});return{total:total,cats:cats}}
+  if(D.limit){
+    var all=compute(),loc=locate(all,t),p=loc.cur;
+    if(p){var r=limitRowFor(t),nx=limitRowFor(addDays(t,1)),last7=[];
+      for(var i=6;i>=0;i--){var rw=limitRowFor(addDays(t,-i));last7.push(!rw?'x':rw.spent===null?'n':rw.spent<=rw.lim?'g':'r')}
+      out.lim={s:p.start,e:p.end,L:p.limit,N:p.N,spent:p.rows.filter(function(x){return x.date<=t}).reduce(function(a,x){return a+(x.spent||0)},0),
+        dayLim:r.lim,daySpent:r.spent||0,carry:r.carry,tom:nx?{lim:nx.lim,carry:r.rest}:null,last7:last7};
+    }
+  }
+  var mk=mkOf(t),pm=addMonths(mk,-1),pa=pm.split('-').map(Number),d=P(t).d,pd=Math.min(d,dim(pa[0],pa[1])),cur=catsOf(mk+'-01',t);
+  out.exp={m:MON[P(t).m-1].toLowerCase(),total:cur.total,cats:cur.cats,prev:sumExp(pm+'-01',ds(pa[0],pa[1],pd)),prevLabel:pd+' '+MONG[pa[1]-1]};
+  return out;
 }
 var wsT=null,wsLast='',wsAt=0;
 function wsSoon(){if(!D||!apBase())return;clearTimeout(wsT);wsT=setTimeout(wsSend,2500)}
@@ -329,16 +336,15 @@ function viewWidget(){
   var h=subTop('Виджет');
   if(!apBase())return wrap(h+'<div class="card"><p class="small" style="margin-top:0">Виджет берёт цифры с вашего сервера Apple Pay. Сначала подключите Apple Pay — там же есть инструкция.</p><button class="btn block mt" data-act="open-ap">Открыть Apple Pay</button></div>');
   function st(t,b){return '<li><b>'+t+'</b>'+(b?'<div>'+b+'</div>':'')+'</li>'}
-  h+='<div class="card"><p class="small" style="margin-top:0">Кольцо лимита (зелёное до 80&nbsp;%, жёлтое до 100&nbsp;%, красное с заходом на второй круг) и круговая диаграмма категорий за период лимита. Работает через бесплатное приложение Scriptable.</p>'+
+  h+='<div class="card"><p class="small" style="margin-top:0"><b>Лимит</b> — кольцо за сегодня (траты от лимита дня) и полоска всего периода с отметкой темпа. Зелёный до 80&nbsp;%, жёлтый до 100&nbsp;%, красный — больше, кольцо уходит на второй круг.</p><p class="small"><b>Расходы</b> — все траты за месяц по категориям, без учёта лимита, и сравнение с прошлым месяцем.</p><p class="small">Маленький виджет — краткий, средний — расширенный. Работает через бесплатное приложение Scriptable.</p>'+
     '<p class="small">Сводка на сервере: '+(D.ap.ws?'обновлена '+(localDay(D.ap.ws)===today()?'сегодня':shortDate(localDay(D.ap.ws)))+' в '+hm(D.ap.ws):'ещё не отправлялась')+'.</p></div>';
   h+='<div class="card guide"><ol class="steps" style="margin-top:0">'+
     st('Установи Scriptable','<a href="https://apps.apple.com/app/scriptable/id1405459188" target="_blank" rel="noopener">App Store → Scriptable</a>, бесплатно.')+
     st('Скопируй скрипт','<button class="btn sm ghost mt" data-act="wg-copy">Скопировать скрипт виджета</button><div class="mt">Адрес сервера и ключ уже внутри — никому его не пересылай.</div>')+
     st('Создай скрипт в Scriptable','Открой Scriptable → «+» → вставь → вверху назови «Мой бюджет» → «Готово».')+
-    st('Добавь виджет на экран «Домой»','Долгое нажатие на экран → «Изменить» → «Добавить виджет» → Scriptable. Маленький — кольцо лимита, средний — лимит и категории.')+
-    st('Выбери скрипт','Долгое нажатие на виджет → «Изменить виджет» → Script: «Мой бюджет». Parameter: пусто, или <code>категории</code> — только диаграмма, или <code>лимит</code> — только кольцо.')+
-    st('Экран блокировки (по желанию)','Долгое нажатие на экран блокировки → «Настроить» → «Экран блокировки» → поле виджетов → Scriptable → круглый или прямоугольный → Script «Мой бюджет».')+
-    '</ol><p class="small">iOS обновляет виджет примерно раз в 15–30 минут. Оплаты Apple Pay, пришедшие при закрытом приложении, виджет добавляет к кольцу сам; точная цифра — после открытия приложения.</p></div>';
+    st('Добавь виджет на экран «Домой»','Долгое нажатие на экран → «Изменить» → «Добавить виджет» → Scriptable. Маленький — краткий, средний — расширенный.')+
+    st('Выбери скрипт и вид','Долгое нажатие на виджет → «Изменить виджет» → Script: «Мой бюджет». Parameter: <code>лимит</code> или <code>расходы</code> (пусто — лимит). Хочешь оба — добавь два виджета.')+
+    '</ol><p class="small">iOS обновляет виджет примерно раз в 15–30 минут. Оплаты Apple Pay, пришедшие при закрытом приложении, виджет добавляет к лимиту сам; точная цифра — после открытия приложения.</p><p class="small">Обновил приложение — скопируй скрипт заново и замени его в Scriptable: старый скрипт новую сводку не понимает.</p></div>';
   return wrap(h);
 }
 
