@@ -1,7 +1,7 @@
 /* Мой бюджет — учёт доходов/расходов + дневной лимит. Данные хранятся только на этом устройстве. */
 (function(){
 'use strict';
-var APP_VERSION=10; /* = version in version.json and CACHE in sw.js */
+var APP_VERSION=11; /* = version in version.json and CACHE in sw.js */
 var app=document.getElementById('app'),ov=document.getElementById('ov'),tipEl=document.getElementById('tip'),toastEl=document.getElementById('toast');
 
 /* ================= utils ================= */
@@ -107,6 +107,7 @@ function catBadge(c){return '<div class="cic" style="--cc:'+colorOf(c?topId(c.id
 function catIcon(id){return catBadge(C.cat[id]||null)}
 function counts(id){var c=C.cat[id];if(!c)return true;if(c.nl)return false;var p=c.parent&&C.cat[c.parent];if(p&&p.nl)return false;return true}
 var PAL=['--s1','--s2','--s3','--s4','--s5','--s6','--s7','--s8'];
+var PALHEX=['#2a78d6','#eb6834','#1baf7a','#eda100','#e87ba4','#008300','#6250d6','#e34948'];
 function colorOf(id){var s=C.slot[id];return s!=null&&s<8?'var('+PAL[s]+')':'var(--other)'}
 
 /* ================= persistence ================= */
@@ -116,7 +117,7 @@ function idbGet(k){return new Promise(function(res){try{var q=idb.transaction('k
 function idbPut(k,v){return new Promise(function(res,rej){try{var t=idb.transaction('kv','readwrite');t.objectStore('kv').put(v,k);t.oncomplete=function(){res()};t.onerror=function(){rej(t.error)};t.onabort=function(){rej(t.error)}}catch(e){rej(e)}})}
 function lsSave(d){try{localStorage.setItem('budget-app-v2',JSON.stringify(d));return true}catch(e){toast('Не удалось сохранить!');return false}}
 function persist(){clearTimeout(saveT);saveT=setTimeout(flush,120)}
-function flush(){clearTimeout(saveT);saveT=null;if(!D)return;var data=clone(D);if(idb)idbPut('state',data).catch(function(){lsSave(data)});else lsSave(data)}
+function flush(){clearTimeout(saveT);saveT=null;if(!D)return;var data=clone(D);if(idb)idbPut('state',data).catch(function(){lsSave(data)});else lsSave(data);wsSoon()}
 document.addEventListener('visibilitychange',function(){
   if(document.hidden){UI.hiddenAt=Date.now();if(saveT)flush();return}
   if(SEC.pin&&UI.hiddenAt&&Date.now()-UI.hiddenAt>LOCK_MS&&!(UI.lock&&UI.lock.mode==='unlock'))lockNow();
@@ -301,6 +302,110 @@ function realign(){
   cur.start=per.start;cur.end=per.end;return cur;
 }
 function limitRowFor(date){if(!D.limit)return null;var all=compute();for(var i=0;i<all.length;i++){var p=all[i];if(p.start<=date&&date<=p.end)return p.rows[diff(p.start,date)]}return null}
+
+/* ================= widget (Scriptable, worker/widget.js): short summary to the user's own Apple Pay server ================= */
+function widgetSummary(){
+  var t=today(),per,lim=null,spent=null,td=null;
+  if(D.limit){var all=compute(),loc=locate(all,t),p=loc.cur||loc.ended||all[all.length-1],r=limitRowFor(t);per={s:p.start,e:p.end};lim=p.limit;
+    spent=p.rows.filter(function(x){return x.date<=t}).reduce(function(a,x){return a+(x.spent||0)},0);if(r)td={avail:r.carry+r.lim,spent:r.spent||0}}
+  else{var mr=mRange(mkOf(t));per={s:mr.from,e:mr.to}}
+  var to=per.e<t?per.e:t,m={},total=0;
+  D.tx.forEach(function(x){if(x.type!=='exp'||x.date<per.s||x.date>to)return;var k=topId(x.cat);m[k]=(m[k]||0)+x.amount;total+=x.amount});
+  var arr=Object.keys(m).map(function(k){return{id:k,s:m[k]}}).sort(function(a,b){return b.s-a.s}),top=arr.slice(0,5),rest=arr.slice(5).reduce(function(a,x){return a+x.s},0);
+  var cats=top.map(function(x){var c=C.cat[x.id],sl=C.slot[x.id];return{n:c?splitName(c.name).label:'Без категории',p:total?Math.round(x.s/total*100):0,c:sl!=null&&sl<8?PALHEX[sl]:'#b5b4ad'}});
+  if(rest)cats.push({n:'Другое',p:Math.round(rest/total*100),c:'#b5b4ad'});
+  return{v:1,per:per,lim:lim,spent:spent,today:td,total:total,cats:cats};
+}
+var wsT=null,wsLast='',wsAt=0;
+function wsSoon(){if(!D||!apBase())return;clearTimeout(wsT);wsT=setTimeout(wsSend,2500)}
+function wsSend(){
+  if(!D||!apBase()||!navigator.onLine)return;var sm=widgetSummary(),k=JSON.stringify(sm);
+  if(k===wsLast&&Date.now()-wsAt<6*3600e3)return;
+  sm.t=Date.now();
+  fetch(apBase()+'/summary',{method:'POST',headers:{'X-Key':D.ap.key,'Content-Type':'application/json'},body:JSON.stringify(sm),keepalive:true})
+    .then(function(r){if(r.ok){wsLast=k;wsAt=Date.now();D.ap.ws=wsAt}}).catch(function(){});
+}
+function viewWidget(){
+  var h=subTop('Виджет');
+  if(!apBase())return wrap(h+'<div class="card"><p class="small" style="margin-top:0">Виджет берёт цифры с вашего сервера Apple Pay. Сначала подключите Apple Pay — там же есть инструкция.</p><button class="btn block mt" data-act="open-ap">Открыть Apple Pay</button></div>');
+  function st(t,b){return '<li><b>'+t+'</b>'+(b?'<div>'+b+'</div>':'')+'</li>'}
+  h+='<div class="card"><p class="small" style="margin-top:0">Кольцо лимита (зелёное до 80&nbsp;%, жёлтое до 100&nbsp;%, красное с заходом на второй круг) и круговая диаграмма категорий за период лимита. Работает через бесплатное приложение Scriptable.</p>'+
+    '<p class="small">Сводка на сервере: '+(D.ap.ws?'обновлена '+(localDay(D.ap.ws)===today()?'сегодня':shortDate(localDay(D.ap.ws)))+' в '+hm(D.ap.ws):'ещё не отправлялась')+'.</p></div>';
+  h+='<div class="card guide"><ol class="steps" style="margin-top:0">'+
+    st('Установи Scriptable','<a href="https://apps.apple.com/app/scriptable/id1405459188" target="_blank" rel="noopener">App Store → Scriptable</a>, бесплатно.')+
+    st('Скопируй скрипт','<button class="btn sm ghost mt" data-act="wg-copy">Скопировать скрипт виджета</button><div class="mt">Адрес сервера и ключ уже внутри — никому его не пересылай.</div>')+
+    st('Создай скрипт в Scriptable','Открой Scriptable → «+» → вставь → вверху назови «Мой бюджет» → «Готово».')+
+    st('Добавь виджет на экран «Домой»','Долгое нажатие на экран → «Изменить» → «Добавить виджет» → Scriptable. Маленький — кольцо лимита, средний — лимит и категории.')+
+    st('Выбери скрипт','Долгое нажатие на виджет → «Изменить виджет» → Script: «Мой бюджет». Parameter: пусто, или <code>категории</code> — только диаграмма, или <code>лимит</code> — только кольцо.')+
+    st('Экран блокировки (по желанию)','Долгое нажатие на экран блокировки → «Настроить» → «Экран блокировки» → поле виджетов → Scriptable → круглый или прямоугольный → Script «Мой бюджет».')+
+    '</ol><p class="small">iOS обновляет виджет примерно раз в 15–30 минут. Оплаты Apple Pay, пришедшие при закрытом приложении, виджет добавляет к кольцу сам; точная цифра — после открытия приложения.</p></div>';
+  return wrap(h);
+}
+
+/* ================= notifications: texts & weekly report (computed on the phone only) ================= */
+function sumExp(from,to){var s=0;D.tx.forEach(function(t){if(t.type==='exp'&&t.date>=from&&t.date<=to)s+=t.amount});return s}
+function limRows(from,to){var out=[];if(!D.limit)return out;compute().forEach(function(p){p.rows.forEach(function(r){if(r.date>=from&&r.date<=to)out.push(r)})});return out}
+function streakTo(d){if(!D.limit)return 0;var flat=[];compute().forEach(function(p){p.rows.forEach(function(r){if(r.date<=d)flat.push(r)})});var n=0;for(var i=flat.length-1;i>=0;i--){var r=flat[i];if(r.date===d&&r.spent===null)continue;if(r.spent!==null&&r.spent<=r.lim)n++;else break}return n}
+function forecastAt(d){
+  if(!D.limit)return null;var all=compute(),loc=locate(all,d),p=loc.cur;if(!p)return null;
+  var past=p.rows.filter(function(r){return r.date<=d}),fut=p.rows.filter(function(r){return r.date>d}),en=past.filter(function(r){return r.spent!==null});
+  var avg=en.length?en.reduce(function(a,r){return a+r.spent},0)/en.length:0,last=past[past.length-1];
+  return{end:p.end,value:Math.round((last.rest+fut.reduce(function(a,r){return a+r.lim},0)-avg*fut.length)/1000)*1000};
+}
+function dailyNote(d){
+  d=d||today();var spent=sumExp(d,d),r=limitRowFor(d);
+  if(!entered(d))return{title:'Сегодня ещё нет операций',body:'Внеси расходы за день'+(r?' · доступно сегодня '+fmt(r.carry+r.lim):'')+'.'};
+  if(!r)return{title:'Итог дня',body:'Сегодня потрачено '+fmt(spent)+'.'};
+  var nx=limitRowFor(addDays(d,1)),tm=nx?r.rest+nx.lim:0,tail=nx?(tm>=0?'Завтра доступно '+fmt(tm)+'.':'Завтра: недостаток '+fmt(-tm)+'.'):'Период закончился: '+(r.rest<0?'недостаток ':'остаток ')+fmtS(r.rest)+'.';
+  var d0=r.lim-r.spent;
+  return{title:d0>=0?'В лимите · сэкономлено '+fmt(d0):'Перерасход '+fmt(-d0),body:'Потрачено '+fmt(r.spent)+' из '+fmt(r.lim)+'. '+tail};
+}
+function weekReport(d){
+  d=d||today();var from=weekStart(d),to=addDays(from,6),upto=to<today()?to:today(),pf=addDays(from,-7),pt=addDays(upto,-7);
+  var exp=sumExp(from,upto),prev=sumExp(pf,pt),inc=0,cats={},big=null;
+  D.tx.forEach(function(t){if(t.date<from||t.date>upto)return;if(t.type==='inc'){inc+=t.amount;return}var k=topId(t.cat);cats[k]=(cats[k]||0)+t.amount;if(!big||t.amount>big.amount)big=t});
+  var top=Object.keys(cats).map(function(k){return{id:k,s:cats[k]}}).sort(function(a,b){return b.s-a.s}).slice(0,3);
+  var rows=limRows(from,upto),ok=0,over=0,na=0,net=0;rows.forEach(function(r){if(r.spent===null)na++;else{net+=r.lim-r.spent;if(r.spent<=r.lim)ok++;else over++}});
+  var nodays=0;for(var x=from;x<=upto;x=addDays(x,1))if(!entered(x))nodays++;
+  var last=rows.length?rows[rows.length-1]:null;
+  return{from:from,to:to,upto:upto,exp:exp,prev:prev,pct:prev?Math.round((exp-prev)/prev*100):null,inc:inc,top:top,big:big,
+    lim:D.limit?{days:rows.length,ok:ok,over:over,na:na,net:net,carry:last?last.rest:null,streak:streakTo(upto),fc:forecastAt(upto)}:null,nodays:nodays};
+}
+function weeklyNote(d){
+  var w=weekReport(d),b='Расходы '+fmt(w.exp)+(w.pct!==null?' ('+(w.pct<=0?'на '+Math.abs(w.pct)+' % меньше':'на '+w.pct+' % больше')+')':'');
+  if(w.lim)b+=' · в лимите '+w.lim.ok+' из '+w.lim.days+' дн.'+(w.lim.carry!==null?' · '+(w.lim.carry<0?'недостаток ':'переходит ')+fmtS(w.lim.carry):'');
+  return{title:'Неделя '+P(w.from).d+(P(w.from).m!==P(w.to).m?' '+MONS[P(w.from).m-1]:'')+'–'+shortDate(w.to),body:b+'. Нажми — полный отчёт.'};
+}
+function viewReport(){
+  var w=weekReport(UI.report),L=w.lim,h='<div class="topbar" style="justify-content:flex-start"><button class="icon solid" data-act="report-close" aria-label="Назад">'+I.back+'</button><h1 style="margin-top:4px;font-size:26px">Отчёт за неделю</h1></div>';
+  h+='<p class="sub">'+shortDate(w.from)+' – '+shortDate(w.to)+(w.upto<w.to?' · по '+shortDate(w.upto):'')+'</p>';
+  h+='<div class="card"><div class="label">Расходы</div><div class="rbig">'+fmt(w.exp)+' <small>сум</small></div>'+
+    (w.pct!==null?'<div class="small" style="margin-top:4px"><b class="'+(w.pct<=0?'pos':'neg')+'">'+(w.pct<=0?'↓ на '+Math.abs(w.pct):'↑ на '+w.pct)+' %</b> к прошлой неделе ('+fmt(w.prev)+')</div>':'')+
+    '<div class="mt">'+kv('Доходы',w.inc?'+'+fmt(w.inc):'0',w.inc?'pos':'')+'</div></div>';
+  if(L){
+    h+='<div class="card"><h3>Лимит</h3><div class="bigstat"><div><b class="pos">'+L.ok+'</b><span>в лимите</span></div><div><b class="neg">'+L.over+'</b><span>перерасход</span></div><div><b>'+L.streak+'</b><span>'+plural(L.streak,'день','дня','дней')+' подряд</span></div></div>'+
+      '<div class="mt">'+kv('Итог недели',(L.net>=0?'сэкономлено ':'перерасход ')+fmt(Math.abs(L.net)),L.net>=0?'pos':'neg')+
+      (L.carry!==null?kv(L.carry<0?'Недостаток на конец недели':'Остатки на конец недели',fmtS(L.carry),cls(L.carry)):'')+
+      (L.fc?kv('Прогноз на '+shortDate(L.fc.end),(L.fc.value<0?'не хватит ':'останется ')+fmt(Math.abs(L.fc.value)),L.fc.value<0?'neg':'pos'):'')+'</div>'+
+      (L.fc?'<p class="small">Прогноз — если тратить так же, как в среднем в этом периоде.</p>':'')+'</div>';
+  }
+  if(w.top.length){var mx=w.top[0].s;h+='<div class="card"><h3>Больше всего</h3>'+w.top.map(function(x){var c=C.cat[x.id];return '<div class="rtop">'+catBadge(c)+'<div class="rtm"><div class="between"><b>'+esc(c?splitName(c.name).label:'Без категории')+'</b><b>'+fmt(x.s)+'</b></div><div class="rbar"><i style="width:'+Math.max(4,Math.round(x.s/mx*100))+'%;background:'+colorOf(x.id)+'"></i></div></div></div>'}).join('')+'</div>'}
+  if(w.big)h+='<div class="card"><h3>Самая крупная покупка</h3><div class="mt">'+txRow(w.big)+'</div></div>';
+  h+='<div class="card">'+kv('Дней без операций',w.nodays?'<span class="neg">'+w.nodays+'</span>':'0')+kv('Бюджеты по категориям','<span class="muted">появятся вместе с бюджетами</span>')+'</div>';
+  return wrap(h);
+}
+function viewNotif(){
+  var n=UI.nset||(UI.nset={daily:true,dt:'21:00',weekly:true,wd:6,wt:'20:00'}),h=subTop('Уведомления');
+  function sw(k){return '<button class="sw'+(n[k]?' on':'')+'" data-act="nset-tog" data-val="'+k+'"></button>'}
+  h+='<div class="card"><div class="row" style="border:0;padding-top:0"><span><b>Итог дня</b><br><small>Сколько потрачено, лимит, сколько можно завтра. Если день не внесён — напоминание.</small></span>'+sw('daily')+'</div>'+
+    '<div class="row"><span>Время</span><input class="in" type="time" value="'+n.dt+'" style="width:110px"></div></div>';
+  h+='<div class="card"><div class="row" style="border:0;padding-top:0"><span><b>Отчёт за неделю</b><br><small>Расходы, лимит, прогноз, топ категорий. По нажатию — полный отчёт.</small></span>'+sw('weekly')+'</div>'+
+    '<div class="row"><span>День</span><div class="seg mini wd">'+['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(function(x,i){return '<button class="'+(n.wd===i?'on':'')+'" data-act="nset-wd" data-val="'+i+'">'+x+'</button>'}).join('')+'</div></div>'+
+    '<div class="row"><span>Время</span><input class="in" type="time" value="'+n.wt+'" style="width:110px"></div></div>';
+  h+='<button class="btn ghost block" data-act="report-open">Посмотреть отчёт за эту неделю</button>';
+  h+='<p class="small" style="margin:12px 4px">Текст уведомлений собирается на телефоне из ваших данных. Сервер знает только адрес для уведомлений и время отправки.</p>';
+  return wrap(h);
+}
 
 /* ================= aggregates ================= */
 function txIn(from,to,type){return D.tx.filter(function(t){return t.date>=from&&t.date<=to&&(!type||t.type===type)})}
@@ -823,6 +928,8 @@ function viewLim(){var h=subTop('Лимит');
 function viewSettings(){
   if(UI.setView==='cats')return viewCats();
   if(UI.setView==='lim')return viewLim();
+  if(UI.setView==='notif')return viewNotif();
+  if(UI.setView==='widget')return viewWidget();
   if(UI.setView==='stats')return viewStatsAdmin();
   if(UI.setView==='imp')return viewImp();
   if(UI.setView==='bak')return viewBak();
@@ -839,6 +946,7 @@ function viewSettings(){
   h+=navRow('open-lim','Лимит',lp?range(lp)+' · '+fmt(lp.limit)+' сум':'Не настроен');
   h+=navRow('open-cats','Категории','В лимите '+inL+' из '+ex.length+' категорий расходов');
   h+=navRow('open-ap','Apple Pay',apStatus());
+  h+=navRow('open-widget','Виджет',!apBase()?'Нужен подключённый Apple Pay':D.ap.ws?'Сводка обновлена '+hm(D.ap.ws):'Кольцо лимита и категории');
   h+=navRow('open-pin','Пароль',SEC.pin?'<span class="pos">Включён</span>'+(SEC.fid?' · Face ID':''):'Выключен');
   if(!isStandalone())h+='<div class="card"><h3>Установка на iPhone</h3><p class="small">Открой страницу в Safari → «Поделиться» → «На экран „Домой“». Дальше запускай с иконки — работает без интернета.</p></div>';
   h+=navRow('open-imp','Импорт из «Умного счёта»',D.importedAt?'Последний импорт: '+shortDate(D.importedAt):'Перенести операции из файла .mmbak');
@@ -967,7 +1075,7 @@ function render(){
   if(!UI.loaded)html=wrap('<div class="loading"><div class="spin"></div></div>');
   else if(!D.cats.length)html=viewWelcome();
   else{
-    html=UI.tab==='ops'?viewOps():UI.tab==='stats'?viewStats():UI.tab==='limit'?viewLimit():viewSettings();
+    html=UI.report?viewReport():UI.tab==='ops'?viewOps():UI.tab==='stats'?viewStats():UI.tab==='limit'?viewLimit():viewSettings();
     if(UI.tab==='ops'&&UI.search===null)html+='<button class="fab" data-act="add" aria-label="Добавить операцию">+</button>';
     html+=tabbar();
   }
@@ -1034,7 +1142,7 @@ function viewStatsAdmin(){
     '<button class="btn ghost block mt2" data-act="stats-reload">Обновить</button>';
   return wrap(h);
 }
-function tick(){checkUpdate();apSync();statsPing();if(UI.lastDay&&today()!==UI.lastDay){if(D&&reconcile()){}if(!UI.editor)render()}}
+function tick(){checkUpdate();apSync();statsPing();wsSoon();if(UI.lastDay&&today()!==UI.lastDay){if(D&&reconcile()){}if(!UI.editor)render()}}
 
 /* ================= actions ================= */
 var A={
@@ -1134,6 +1242,20 @@ var A={
   'open-pin':function(){UI.setView='pin';window.scrollTo(0,0)},
   'ver-tap':function(){var n=Date.now();UI.vt=(UI.vt||[]).filter(function(t){return n-t<3000});UI.vt.push(n);if(UI.vt.length>=5){UI.vt=[];statsLoad(true)}return 'ov'},
   'stats-reload':function(){statsLoad(false)},
+  'open-widget':function(){UI.setView='widget';window.scrollTo(0,0);wsSoon()},
+  'wg-copy':function(){
+    var p=fetch(new URL('worker/widget.js',location.href).href,{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.text()}).then(function(t){return t.replace('__URL__',apBase()).replace('__KEY__',D.ap.key)});
+    function fail(){toast('Не скопировалось — попробуй ещё раз')}
+    try{
+      if(window.ClipboardItem&&navigator.clipboard.write){navigator.clipboard.write([new ClipboardItem({'text/plain':p.then(function(t){return new Blob([t],{type:'text/plain'})})})]).then(function(){toast('Скрипт скопирован')},fail);return}
+      p.then(function(t){return navigator.clipboard.writeText(t)}).then(function(){toast('Скрипт скопирован')},fail);
+    }catch(e){fail()}
+  },
+  'open-notif':function(){UI.setView='notif';window.scrollTo(0,0)},
+  'nset-tog':function(el){UI.nset[el.dataset.val]=!UI.nset[el.dataset.val]},
+  'nset-wd':function(el){UI.nset.wd=+el.dataset.val},
+  'report-open':function(){UI.report=today();window.scrollTo(0,0)},
+  'report-close':function(){UI.report=null;window.scrollTo(0,0)},
   'open-lim':function(){UI.setView='lim';window.scrollTo(0,0)},
   'open-imp':function(){UI.setView='imp';window.scrollTo(0,0)},
   'open-bak':function(){UI.setView='bak';window.scrollTo(0,0)},
@@ -1237,6 +1359,6 @@ async function init(){
   if('serviceWorker' in navigator&&location.protocol!=='file:')navigator.serviceWorker.register('sw.js').catch(function(){});
   setInterval(tick,30000);checkUpdate();apSync(true);statsPing();
 }
-window.__budget={get D(){return D},UI:UI,render:render};
+window.__budget={get D(){return D},UI:UI,render:render,dailyNote:dailyNote,weeklyNote:weeklyNote,widgetSummary:widgetSummary};
 init();
 })();
